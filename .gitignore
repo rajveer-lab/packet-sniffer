@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Review slides and packaged copies are shared separately
+*.pptx
+*.pdf
+*.zip
