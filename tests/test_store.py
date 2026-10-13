@@ -79,3 +79,34 @@ def test_bandwidth_window_and_rates_use_the_last_full_second():
     assert sum(point["bytes"] for point in s["bandwidth"]) == 0
     assert s["bytes_per_sec"] == 0
     assert s["total_bytes"] == 1050        # totals are not windowed
+
+
+def test_packets_older_than_the_retention_period_decay():
+    clock = FakeClock(1000.0)
+    store = TrafficStore(retention_seconds=30, clock=clock)
+    store.add(record(1000.0, proto="UDP", src="192.168.1.9", dst="8.8.8.8", length=80))
+    clock.now = 1020.0
+    store.add(record(1020.0, length=400))
+
+    clock.now = 1040.0                     # the UDP packet is now 40 s old
+    assert [p["proto"] for p in store.packets_after(0)] == ["TCP"]
+    s = store.stats()
+    assert [p["name"] for p in s["protocols"]] == ["TCP"]
+    assert "8.8.8.8" not in [h["host"] for h in s["top_hosts"]]
+    assert (s["recent_packets"], s["buffered"]) == (1, 1)
+    assert s["total_packets"] == 2         # lifetime total still counts it
+
+    clock.now = 1100.0                     # everything has decayed
+    s = store.stats()
+    assert (s["protocols"], s["top_hosts"], s["recent_packets"]) == ([], [], 0)
+    assert store.packets_after(0) == []
+
+
+def test_query_filters_packets_and_reports_the_newest_id():
+    store = TrafficStore(clock=FakeClock())
+    store.add(record(1000, proto="TCP"))
+    store.add(record(1000, proto="UDP"))
+    store.add(record(1000, proto="TCP"))
+    result = store.query(0, match=lambda p: p["proto"] == "UDP")
+    assert [p["id"] for p in result["packets"]] == [2]
+    assert result["last_id"] == 3          # next poll starts after every scanned packet
