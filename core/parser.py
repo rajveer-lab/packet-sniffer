@@ -67,6 +67,9 @@ def parse_packet(pkt, timestamp=None):
         "dport": None,
         "service": None,
         "flags": [],
+        "icmp_type": None,
+        "arp_op": None,     # 1 = request ("who has"), 2 = reply ("is at")
+        "arp_mac": None,    # MAC the ARP sender claims for its IP
         "info": "",
     }
 
@@ -78,7 +81,7 @@ def parse_packet(pkt, timestamp=None):
     # ARP sits directly on the link layer, with no IP header
     if ARP in pkt:
         arp = pkt[ARP]
-        record.update(proto="ARP", src=arp.psrc, dst=arp.pdst)
+        record.update(proto="ARP", src=arp.psrc, dst=arp.pdst, arp_op=arp.op, arp_mac=arp.hwsrc)
         if arp.op == 1:
             record["info"] = f"Who has {arp.pdst}? Tell {arp.psrc}"
         elif arp.op == 2:
@@ -113,7 +116,7 @@ def parse_packet(pkt, timestamp=None):
         record["info"] = f"{udp.sport} -> {udp.dport}"
     elif ICMP in pkt:
         icmp_type = pkt[ICMP].type
-        record["proto"] = "ICMP"
+        record.update(proto="ICMP", icmp_type=icmp_type)
         record["info"] = ICMP_TYPES.get(icmp_type, f"Type {icmp_type}")
     elif record["ip_version"] == 6 and ip.nh == 58:
         record["proto"] = "ICMP"
