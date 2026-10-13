@@ -43,6 +43,7 @@ def test_dns_query_over_udp():
 def test_icmp_echo_request():
     r = parse_packet(ETH / IP(src="192.168.1.5", dst="1.1.1.1") / ICMP(type=8))
     assert (r["proto"], r["info"], r["sport"]) == ("ICMP", "Echo request", None)
+    assert r["icmp_type"] == 8
 
 
 def test_arp_request_has_no_ip_header():
@@ -50,6 +51,14 @@ def test_arp_request_has_no_ip_header():
     r = parse_packet(pkt)
     assert (r["proto"], r["src"], r["dst"], r["ip_version"]) == ("ARP", "192.168.1.5", "192.168.1.1", None)
     assert r["info"] == "Who has 192.168.1.1? Tell 192.168.1.5"
+    assert r["arp_op"] == 1
+
+
+def test_arp_reply_records_the_claimed_mac():
+    pkt = Ether(src=MAC_B, dst=MAC_A) / ARP(op=2, hwsrc=MAC_B, psrc="192.168.1.1", hwdst=MAC_A, pdst="192.168.1.5")
+    r = parse_packet(pkt)
+    assert (r["arp_op"], r["arp_mac"], r["src"]) == (2, MAC_B, "192.168.1.1")
+    assert r["info"] == f"192.168.1.1 is at {MAC_B}"
 
 
 def test_ipv6_udp_and_icmpv6():
