@@ -6,3 +6,6 @@ __pycache__/
 *.pptx
 *.pdf
 *.zip
+
+# Packets saved with --save
+captures/
