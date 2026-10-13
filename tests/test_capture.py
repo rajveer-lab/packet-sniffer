@@ -2,9 +2,11 @@ import time
 
 from scapy.layers.inet import IP, TCP, UDP
 from scapy.layers.l2 import Ether
-from scapy.utils import wrpcap
+from scapy.utils import rdpcap, wrpcap
 
 from core.capture import PacketPipeline
+from core.recorder import RotatingPcapWriter
+from core.security import SecurityMonitor
 from core.store import TrafficStore
 
 # Explicit addresses, so Scapy never has to look up this machine's routes
@@ -80,3 +82,43 @@ def test_full_queue_counts_dropped_packets_instead_of_blocking():
     for _ in range(5):
         pipeline._enqueue(ETH / IP(src="10.0.0.1", dst="10.0.0.2") / TCP())   # no consumer running
     assert pipeline.status()["dropped"] == 3
+
+
+def test_packet_limit_stops_capture_by_itself(tmp_path):
+    pcap = tmp_path / "three.pcap"
+    write_pcap(pcap)
+    store = TrafficStore()
+    pipeline = PacketPipeline(store, limit_packets=5)
+
+    pipeline.start_replay(str(pcap), speed=0, loop=True)   # would run forever without the limit
+    assert wait_for(lambda: not pipeline.status()["running"])
+    assert wait_for(lambda: store.last_id == 5)
+    status = pipeline.status()
+    assert (status["captured"], status["stopped"]) == (5, "packet limit reached")
+    pipeline.stop()
+
+
+def test_time_limit_stops_capture_by_itself(tmp_path):
+    pcap = tmp_path / "three.pcap"
+    write_pcap(pcap)
+    pipeline = PacketPipeline(TrafficStore(), limit_seconds=0.3)
+
+    pipeline.start_replay(str(pcap), speed=1, loop=True)
+    assert wait_for(lambda: pipeline.status()["stopped"] == "time limit reached", timeout=3)
+    assert wait_for(lambda: not pipeline.status()["running"])
+    pipeline.stop()
+
+
+def test_records_go_to_the_security_monitor_and_packets_to_disk(tmp_path):
+    pcap = tmp_path / "three.pcap"
+    write_pcap(pcap)
+    monitor = SecurityMonitor()
+    recorder = RotatingPcapWriter(str(tmp_path / "saved"))
+    pipeline = PacketPipeline(TrafficStore(), monitor=monitor, recorder=recorder)
+
+    pipeline.start_replay(str(pcap), speed=0)
+    assert wait_for(lambda: monitor.checked == 3)
+    pipeline.stop()                                          # also closes the pcap file
+    assert pipeline.status()["saving"]["written"] == 3
+    (saved,) = recorder.files()
+    assert len(rdpcap(saved)) == 3
