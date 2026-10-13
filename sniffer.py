@@ -5,7 +5,9 @@ API with Flask:
 
     GET /               the dashboard
     GET /api/packets    newest packet records   (?after=<id>&limit=<n>)
+                        filtered by &proto=TCP &host=192.168.1.5 &port=443 &q=text
     GET /api/stats      totals, protocol share, top hosts, bandwidth, capture status
+    GET /api/alerts     security alerts and the checks that raise them
 
 Usage:
     python sniffer.py                          capture on the default interface
@@ -13,6 +15,8 @@ Usage:
     python sniffer.py --filter "tcp port 443"  only capture matching packets (BPF)
     python sniffer.py --pcap samples/sample_traffic.pcap --loop
                                                replay a capture file instead
+    python sniffer.py --duration 300           stop capturing after 5 minutes
+    python sniffer.py --save                   also save packets to captures/*.pcap
     python sniffer.py --list-interfaces        show interfaces you can capture on
     python sniffer.py --print                  also print every packet in the terminal
 """
@@ -25,12 +29,15 @@ import time
 from flask import Flask, jsonify, request, send_from_directory
 
 from core.capture import PacketPipeline
+from core.filters import build_filter
+from core.recorder import RotatingPcapWriter
+from core.security import SecurityMonitor
 from core.store import TrafficStore
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
-def create_app(store, pipeline=None):
+def create_app(store, pipeline=None, monitor=None):
     app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
 
     @app.get("/")
@@ -42,13 +49,28 @@ def create_app(store, pipeline=None):
         after = request.args.get("after", default=0, type=int)
         limit = request.args.get("limit", default=200, type=int)
         limit = max(1, min(limit, 1000))
-        return jsonify(packets=store.packets_after(after, limit), last_id=store.last_id)
+        try:
+            match = build_filter(
+                proto=request.args.get("proto"),
+                host=request.args.get("host"),
+                port=request.args.get("port"),
+                text=request.args.get("q"),
+            )
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        return jsonify(store.query(after, limit, match))
 
     @app.get("/api/stats")
     def stats():
         data = store.stats()
         data["capture"] = pipeline.status() if pipeline else None
         return jsonify(data)
+
+    @app.get("/api/alerts")
+    def alerts():
+        if monitor is None:
+            return jsonify(alerts=[], counts={}, rules=[], checked=0, enabled=False)
+        return jsonify(dict(monitor.summary(), enabled=True))
 
     return app
 
@@ -76,6 +98,23 @@ def parse_args():
     parser.add_argument("--host", default="127.0.0.1", help="address for the dashboard server")
     parser.add_argument("--port", type=int, default=5000, help="port for the dashboard server")
     parser.add_argument("--list-interfaces", action="store_true", help="list capture interfaces and exit")
+
+    limits = parser.add_argument_group("limits", "keep the sniffer from collecting packets forever")
+    limits.add_argument("--count", type=int, help="stop capturing after this many packets")
+    limits.add_argument("--duration", type=float, help="stop capturing after this many seconds")
+    limits.add_argument("--retention", type=int, default=300,
+                        help="seconds a packet stays in the table and the statistics (default 300)")
+    limits.add_argument("--max-packets", type=int, default=2000,
+                        help="most packets kept in memory at once (default 2000)")
+
+    saving = parser.add_argument_group("saving", "write packets to rotating .pcap files")
+    saving.add_argument("--save", nargs="?", const="captures", metavar="FOLDER",
+                        help="save packets as .pcap files in FOLDER (default: captures)")
+    saving.add_argument("--file-size", type=float, default=10, metavar="MB",
+                        help="start a new file after this many MB (default 10)")
+    saving.add_argument("--keep-files", type=int, default=5, metavar="N",
+                        help="keep only the newest N files, deleting older ones (default 5)")
+    parser.add_argument("--no-security", action="store_true", help="turn off the security checks")
     parser.add_argument("--print", dest="print_packets", action="store_true",
                         help="also print every packet in the terminal")
     return parser.parse_args()
@@ -89,8 +128,17 @@ def main():
         print(conf.ifaces)
         return
 
-    store = TrafficStore()
-    pipeline = PacketPipeline(store, on_record=print_record if args.print_packets else None)
+    store = TrafficStore(max_packets=args.max_packets, retention_seconds=args.retention)
+    monitor = None if args.no_security else SecurityMonitor()
+    recorder = RotatingPcapWriter(args.save, args.file_size, args.keep_files) if args.save else None
+    pipeline = PacketPipeline(
+        store,
+        on_record=print_record if args.print_packets else None,
+        monitor=monitor,
+        recorder=recorder,
+        limit_packets=args.count,
+        limit_seconds=args.duration,
+    )
     if args.pcap:
         pipeline.start_replay(args.pcap, speed=args.speed, loop=args.loop)
         print(f"Replaying: {args.pcap}" + (" (looping)" if args.loop else ""))
@@ -101,12 +149,23 @@ def main():
         if status["error"]:
             print(f"WARNING: {status['error']}")
 
+    print(f"Keeping: packets from the last {args.retention} s, at most {args.max_packets:,} in memory")
+    if args.count or args.duration:
+        stop = [f"{args.count:,} packets" if args.count else None, f"{args.duration:g} s" if args.duration else None]
+        print("Stops after: " + " or ".join(s for s in stop if s))
+    if recorder:
+        print(f"Saving to: {os.path.abspath(args.save)}  ({args.file_size:g} MB files, newest {args.keep_files} kept)")
+    print("Security checks: " + ("off" if monitor is None else "on"))
+
     host = "localhost" if args.host in ("127.0.0.1", "localhost") else args.host
     print(f"Dashboard: http://{host}:{args.port}")
 
     # Flask logs every request, and the dashboard polls twice a second.
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
-    create_app(store, pipeline).run(host=args.host, port=args.port, threaded=True)
+    try:
+        create_app(store, pipeline, monitor).run(host=args.host, port=args.port, threaded=True)
+    finally:
+        pipeline.stop()   # closes the current .pcap file cleanly
 
 
 if __name__ == "__main__":
