@@ -36,6 +36,7 @@ from core import __version__
 from core.access import add_security_headers, new_token, protect
 from core.capture import PacketPipeline
 from core.filters import build_filter
+from core.processes import ProcessMap
 from core.recorder import RotatingPcapWriter
 from core.security import SecurityMonitor
 from core.store import TrafficStore
@@ -126,6 +127,8 @@ def parse_args():
     saving.add_argument("--keep-files", type=int, default=5, metavar="N",
                         help="keep only the newest N files, deleting older ones (default 5)")
     parser.add_argument("--no-security", action="store_true", help="turn off the security checks")
+    parser.add_argument("--no-apps", action="store_true",
+                        help="do not name the program behind each packet (live capture only)")
 
     access = parser.add_argument_group("access", "who may open the dashboard")
     access.add_argument("--token", help="access code for the dashboard (default: a new random one each run)")
@@ -149,6 +152,10 @@ def main():
     store = TrafficStore(max_packets=args.max_packets, retention_seconds=args.retention)
     monitor = None if args.no_security else SecurityMonitor()
     recorder = RotatingPcapWriter(args.save, args.file_size, args.keep_files) if args.save else None
+    # Programs can only be named for this computer's own live traffic, not for a replayed file.
+    processes = None if (args.pcap or args.no_apps) else ProcessMap()
+    if processes:
+        processes.start()
     pipeline = PacketPipeline(
         store,
         on_record=print_record if args.print_packets else None,
@@ -156,6 +163,7 @@ def main():
         recorder=recorder,
         limit_packets=args.count,
         limit_seconds=args.duration,
+        processes=processes,
     )
     if args.pcap:
         pipeline.start_replay(args.pcap, speed=args.speed, loop=args.loop)
@@ -174,6 +182,9 @@ def main():
     if recorder:
         print(f"Saving to: {os.path.abspath(args.save)}  ({args.file_size:g} MB files, newest {args.keep_files} kept)")
     print("Security checks: " + ("off" if monitor is None else "on"))
+    if processes:
+        print("Programs: named from this computer's open connections"
+              + (f" (WARNING: {processes.error})" if processes.error else ""))
 
     token = None if args.no_auth else (args.token or new_token())
     local = args.host in ("127.0.0.1", "localhost", "::1")
