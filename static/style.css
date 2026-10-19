@@ -25,6 +25,10 @@
 
 * { box-sizing: border-box; }
 
+/* The dashboard redraws every second; the browser's scroll anchoring would keep
+   nudging the page while it does, so the page only moves when the user scrolls. */
+html { overflow-anchor: none; }
+
 body {
   margin: 0;
   background: var(--page);
@@ -108,6 +112,9 @@ button.link {
   position: absolute;
   width: 1px;
   height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
@@ -216,20 +223,46 @@ button:focus-visible, input:focus-visible, .chart:focus-visible { outline: 2px s
 
 /* Packet table */
 /* At most 560px, and never more than ~60% of the window, so the table cannot take over the screen */
-.table-wrap { overflow: auto; max-height: min(560px, 60vh); min-height: 220px; border-top: 1px solid var(--line); overflow-anchor: none; }
+.table-area { position: relative; }
+/* Scrolling inside the table stays inside it, instead of moving the whole page at its ends */
+.table-wrap {
+  overflow: auto;
+  max-height: min(560px, 60vh);
+  min-height: 220px;
+  border-top: 1px solid var(--line);
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+}
+/* Floats over the table, so nothing on the page shifts when it appears */
 .held {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 7px 10px;
-  margin-bottom: 8px;
-  border-radius: 6px;
-  background: var(--orange-tint);
-  color: #5e3d07;
+  gap: 12px;
+  padding: 6px 6px 6px 14px;
+  border-radius: 999px;
+  background: var(--green-dark);
+  color: #fff;
   font-size: 12.5px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(14, 33, 28, 0.25);
 }
-.held button { background: var(--card); border-color: var(--orange); white-space: nowrap; }
+.held.at-top { top: 44px; }
+.held.at-bottom { bottom: 14px; }
+.held button { border-radius: 999px; background: var(--orange); border-color: var(--orange); color: var(--green-dark); }
+th button.sort {
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+th button.sort span { font-size: 9px; margin-left: 2px; }
+th button.sort:hover { color: var(--green-dark); }
 table { width: 100%; border-collapse: collapse; font: 12.5px var(--mono); }
 thead th {
   position: sticky;
@@ -338,7 +371,7 @@ td.info { color: var(--ink-soft); }
 .check.ok .state { color: var(--green); }
 .check.hit .state { color: var(--red); }
 .all-clear { padding: 10px 12px; border-radius: 6px; background: var(--green-tint); color: var(--green-dark); font-size: 13px; }
-.alerts { display: grid; gap: 6px; max-height: 340px; overflow: auto; border-top: 1px solid var(--line); padding-top: 10px; }
+.alerts { display: grid; gap: 6px; max-height: 340px; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); padding-top: 10px; }
 .alert {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -389,6 +422,11 @@ body.locked { min-height: 100vh; display: grid; place-items: center; padding: 16
 .l-net .name { background: var(--green); }
 .l-trans .name { background: var(--orange); color: var(--green-dark); }
 .l-data .name { background: var(--grey); }
+
+/* On wide, tall screens the packet table stays on screen while the side panels scroll past */
+@media (min-width: 1001px) and (min-height: 640px) {
+  .grid > #packets { position: sticky; top: 16px; }
+}
 
 @media (max-width: 1000px) {
   .grid { grid-template-columns: minmax(0, 1fr); }
