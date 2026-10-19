@@ -345,6 +345,27 @@ td.info { color: var(--ink-soft); }
 .sev.s-medium { background: var(--orange); color: var(--green-dark); }
 .sev.s-low { background: var(--grey-tint); color: var(--ink-soft); }
 
+/* Footer */
+.footer { margin-top: 24px; text-align: center; color: var(--ink-faint); font: 11.5px var(--mono); }
+
+/* Unlock page, shown until the access code is given */
+body.locked { min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--green-dark); }
+.lock-card { width: min(440px, 100%); background: var(--card); border-radius: 10px; padding: 28px; }
+.lock-card h1 { margin: 14px 0 8px; font-size: 22px; letter-spacing: -0.01em; }
+.lock-card p { margin: 0 0 18px; color: var(--ink-soft); }
+.lock-card .layers span:first-child { background: var(--green-tint); color: var(--green-dark); }
+.lock-card form { display: grid; gap: 8px; }
+.lock-card label { font: 700 11px var(--mono); letter-spacing: 0.09em; text-transform: uppercase; color: var(--green); }
+.lock-card input {
+  font: 14px var(--mono);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+}
+.lock-card button { padding: 10px 12px; font-size: 13px; background: var(--green-dark); color: #fff; border-color: var(--green-dark); }
+.lock-card .lock-error { margin: 14px 0 0; color: var(--red); font-weight: 600; }
+
 /* Packet details, one band per layer */
 .layer { display: grid; grid-template-columns: 96px 1fr; border-radius: 6px; overflow: hidden; margin-bottom: 6px; font-size: 12.5px; }
 .layer .name { font: 700 11px var(--mono); letter-spacing: 0.06em; padding: 8px; color: #fff; display: flex; align-items: center; }
