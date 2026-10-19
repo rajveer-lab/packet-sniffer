@@ -345,13 +345,16 @@ function BandwidthChart({ points }) {
             <span>{data[h].packets.toLocaleString()} packets &middot; {formatTime(data[h].t)}</span>
           </div>
         )}
-        <table className="sr-only">
-          <caption>Bytes and packets per second, last minute</caption>
-          <thead><tr><th>Time</th><th>Bytes</th><th>Packets</th></tr></thead>
-          <tbody>
-            {data.map(d => <tr key={d.t}><td>{formatTime(d.t)}</td><td>{d.bytes}</td><td>{d.packets}</td></tr>)}
-          </tbody>
-        </table>
+        {/* For screen readers. A table ignores the 1px size, so a div does the hiding. */}
+        <div className="sr-only">
+          <table>
+            <caption>Bytes and packets per second, last minute</caption>
+            <thead><tr><th>Time</th><th>Bytes</th><th>Packets</th></tr></thead>
+            <tbody>
+              {data.map(d => <tr key={d.t}><td>{formatTime(d.t)}</td><td>{d.bytes}</td><td>{d.packets}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -409,34 +412,65 @@ function FilterBar({ filters, setFilters, error }) {
 
 function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters, setFilters, filterError, retention, capturing }) {
   const wrap = useRef(null);
-  // Rows held still while the user has scrolled down to read them, so new
-  // packets arriving at the top do not push everything out of view.
+  // "newest": newest packet at the top. "oldest": oldest at the top and new
+  // packets arrive at the bottom, the way Wireshark lists them.
+  const [order, setOrder] = useState("newest");
+  // Rows held still while the user has scrolled away from where new packets
+  // arrive, so they are not pushed out of view while being read.
   const [held, setHeld] = useState(null);
   const live = packets.slice(0, SHOW_ROWS);
-  const rows = held || live;
+  const newestFirst = held || live;
+  const rows = order === "newest" ? newestFirst : [...newestFirst].reverse();
   const newer = held ? packets.filter(p => p.id > (held[0]?.id ?? 0)).length : 0;
   const filtered = Object.values(filters).some(v => String(v).trim());
   const kept = retention ? ` · kept for ${formatRetention(retention)}` : "";
 
+  // Distance from the end of the table where new packets appear.
+  function fromLiveEnd(el) {
+    return order === "newest" ? el.scrollTop : el.scrollHeight - el.clientHeight - el.scrollTop;
+  }
+  function jumpToLiveEnd() {
+    const el = wrap.current;
+    if (el) el.scrollTop = order === "newest" ? 0 : el.scrollHeight;
+  }
   function onScroll(e) {
-    const away = e.currentTarget.scrollTop > 8;
+    const away = fromLiveEnd(e.currentTarget) > 8;
     if (away && !held) setHeld(live);
     else if (!away && held) setHeld(null);
   }
   function backToLive() {
-    if (wrap.current) wrap.current.scrollTop = 0;
     setHeld(null);
+    jumpToLiveEnd();
   }
+  function toggleOrder() {
+    setHeld(null);
+    setOrder(o => (o === "newest" ? "oldest" : "newest"));
+  }
+  // Switching the order starts at the end where new packets arrive.
+  useLayoutEffect(jumpToLiveEnd, [order]);
+  // Oldest first: follow new packets at the bottom, but only if the user was at
+  // the bottom; any distance beyond what the new rows added means they scrolled up.
+  const lastHeight = useRef(0);
+  useLayoutEffect(() => {
+    const el = wrap.current;
+    if (!el) return;
+    if (order === "oldest") {
+      const grew = Math.max(0, el.scrollHeight - lastHeight.current);
+      if (fromLiveEnd(el) <= grew + 8) el.scrollTop = el.scrollHeight;
+    }
+    lastHeight.current = el.scrollHeight;
+  }, [rows]);
   // A new filter starts again from the newest matching packets.
   useEffect(backToLive, [filterQuery(filters)]);
 
+  const waiting = newer ? ` · ${newer >= KEEP_ROWS ? `${KEEP_ROWS}+` : newer} new packet${newer === 1 ? "" : "s"}` : "";
   return (
     <div className="card" id="packets">
       <div className="card-head">
         <div>
           <div className="label">Live packets</div>
           <div className="muted">
-            {filtered ? `${rows.length} matching · ` : ""}Newest first{kept} &middot; click a row to see its headers
+            {filtered ? `${rows.length} matching · ` : ""}{order === "newest" ? "Newest" : "Oldest"} first{kept} &middot; click a row to see its headers
           </div>
         </div>
         <button className={paused ? "paused" : ""} onClick={() => setPaused(!paused)}>
@@ -444,47 +478,55 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
         </button>
       </div>
       <FilterBar filters={filters} setFilters={setFilters} error={filterError} />
-      {held && (
-        <div className="held">
-          <span>Held still while you scroll{newer ? ` · ${newer >= KEEP_ROWS ? `${KEEP_ROWS}+` : newer} new packet${newer === 1 ? "" : "s"}` : ""}</span>
-          <button onClick={backToLive}>Back to live</button>
-        </div>
-      )}
-      <div className="table-wrap" ref={wrap} onScroll={onScroll}>
-        <table>
-          <thead>
-            <tr>
-              <th>TIME</th><th>SOURCE</th><th>DESTINATION</th><th>PROTO</th>
-              <th>SERVICE</th><th className="num">BYTES</th><th>INFO</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(p => (
-              <tr
-                key={p.id}
-                className={p.id === selectedId ? "selected" : ""}
-                onClick={() => onSelect(p)}
-              >
-                <td className="time">{formatTime(p.time)}</td>
-                <td>{withPort(p.src, p.sport)}</td>
-                <td>{withPort(p.dst, p.dport)}</td>
-                <td><span className={`badge p-${protoClass(p.proto)}`}>{p.proto}</span></td>
-                <td>{p.service || ""}</td>
-                <td className="num">{p.length}</td>
-                <td className="info">{p.info}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!rows.length && (
-          <div className="empty">
-            {filtered
-              ? "No packets match these filters yet."
-              : capturing
-                ? <>Waiting for packets&hellip; open a website to generate some traffic.</>
-                : `Capture has stopped, and packets older than ${formatRetention(retention)} have decayed.`}
+      <div className="table-area">
+        {held && (
+          <div className={`held ${order === "newest" ? "at-top" : "at-bottom"}`} role="status">
+            <span>Held still while you scroll{waiting}</span>
+            <button onClick={backToLive}>Back to live</button>
           </div>
         )}
+        <div className="table-wrap" ref={wrap} onScroll={onScroll}>
+          <table>
+            <thead>
+              <tr>
+                <th aria-sort={order === "newest" ? "descending" : "ascending"}>
+                  <button className="sort" onClick={toggleOrder}
+                    title={order === "newest" ? "Showing newest first. Click for oldest first." : "Showing oldest first. Click for newest first."}>
+                    TIME <span aria-hidden="true">{order === "newest" ? "▼" : "▲"}</span>
+                  </button>
+                </th>
+                <th>SOURCE</th><th>DESTINATION</th><th>PROTO</th>
+                <th>SERVICE</th><th className="num">BYTES</th><th>INFO</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(p => (
+                <tr
+                  key={p.id}
+                  className={p.id === selectedId ? "selected" : ""}
+                  onClick={() => onSelect(p)}
+                >
+                  <td className="time">{formatTime(p.time)}</td>
+                  <td>{withPort(p.src, p.sport)}</td>
+                  <td>{withPort(p.dst, p.dport)}</td>
+                  <td><span className={`badge p-${protoClass(p.proto)}`}>{p.proto}</span></td>
+                  <td>{p.service || ""}</td>
+                  <td className="num">{p.length}</td>
+                  <td className="info">{p.info}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!rows.length && (
+            <div className="empty">
+              {filtered
+                ? "No packets match these filters yet."
+                : capturing
+                  ? <>Waiting for packets&hellip; open a website to generate some traffic.</>
+                  : `Capture has stopped, and packets older than ${formatRetention(retention)} have decayed.`}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
