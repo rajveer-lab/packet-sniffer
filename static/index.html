@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Packet Sniffer Dashboard</title>
   <link rel="stylesheet" href="/static/style.css">
-  <!-- React from a CDN, JSX compiled in the browser, so there is no build step -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
 </head>
 <body>
   <div id="root">
-    <p class="boot">Loading dashboard&hellip; (needs internet access for React the first time)</p>
+    <p class="boot">Loading dashboard&hellip;</p>
   </div>
-  <script type="text/babel" data-presets="react" src="/static/app.jsx"></script>
+  <!-- Everything is served by sniffer.py itself, so the dashboard works offline.
+       app.js is compiled from app.jsx by tools/build.py. -->
+  <script src="/static/vendor/react.production.min.js"></script>
+  <script src="/static/vendor/react-dom.production.min.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>
