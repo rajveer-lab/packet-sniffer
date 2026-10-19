@@ -92,6 +92,9 @@ which only write a file and send nothing on the network.
 - **Live packets** with filters: protocol buttons, an IP, MAC or subnet
   (`192.168.1.0/24`), a port, and a free-text search over every column. All filters
   combine. Clicking a protocol, a top host or an alert filters the table to it.
+  Click **TIME** to sort newest first or oldest first (new packets then arrive at the
+  bottom, as in Wireshark). Scrolling into the table holds its rows still so they can be
+  read; **Back to live** returns to the newest packets.
 - **Packet details**: click a row to see its headers decoded layer by layer.
 - **Security**: the seven checks with their status, and the alerts they raised.
 - **Protocols** and **Top hosts**: shares over the retention period (5 minutes by default).
