@@ -11,6 +11,11 @@ a pattern typical of an attack, or of an unsafe setup, shows up:
                     the first step of a man-in-the-middle attack
     Cleartext       Telnet, FTP, POP3, IMAP or HTTP, which carry passwords
                     and data unencrypted
+    Brute force     one source keeps opening connections to a login service
+                    (SSH, RDP, FTP, Telnet, SMB, VNC, databases), guessing passwords
+    Passwords       a password actually crosses the network in clear text
+                    (FTP/POP3 PASS, IMAP LOGIN, HTTP Basic auth or a login form,
+                    a Telnet password prompt); the alert never shows the password
 
 The same rule firing again for the same source updates the open alert (its
 count and detail) instead of adding a new one, until it has been quiet for
@@ -18,6 +23,8 @@ count and detail) instead of adding a new one, until it has been quiet for
 capture gives the same alerts as the live traffic did.
 """
 
+import base64
+import re
 import threading
 from collections import Counter, OrderedDict, deque
 from itertools import islice
@@ -30,6 +37,22 @@ CLEARTEXT = {
     110: ("POP3", "medium"),
     143: ("IMAP", "medium"),
 }
+
+# Login services that attackers try passwords against, by server port
+LOGIN_SERVICES = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 445: "SMB", 1433: "SQL Server",
+    3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 5900: "VNC",
+}
+
+# Cleartext protocols whose payload is searched for passwords, by server port
+CREDENTIAL_PORTS = {21: "FTP", 23: "Telnet", 80: "HTTP", 110: "POP3", 143: "IMAP", 8080: "HTTP"}
+
+PASS_COMMAND = re.compile(rb"^PASS (.+?)\r?$", re.I | re.M)                  # FTP, POP3
+USER_COMMAND = re.compile(rb"^USER (.+?)\r?$", re.I | re.M)
+IMAP_LOGIN = re.compile(rb'^\S+ LOGIN "?([^\s"]+)"? "?([^\s"]+)"?', re.I | re.M)
+BASIC_AUTH = re.compile(rb"^Authorization: Basic ([A-Za-z0-9+/=]+)", re.I | re.M)
+FORM_PASSWORD = re.compile(rb"(?:^|&)(?:password|passwd|pass|pwd)=([^&\s]+)", re.I | re.M)
+FORM_USER = re.compile(rb"(?:^|&)(?:username|user|login|email)=([^&\s]+)", re.I | re.M)
 
 SEVERITIES = ("high", "medium", "low")
 
@@ -44,6 +67,17 @@ def is_tcp_probe(record):
     return record["proto"] == "TCP" and "ACK" not in flags and "RST" not in flags
 
 
+def describe_secret(secret):
+    """Say how long a captured password is, never what it is."""
+    n = len(secret)
+    article = "an" if str(n).startswith("8") or n in (11, 18) else "a"
+    return f"{article} {n}-character password"
+
+
+def text(raw):
+    return raw.decode("utf-8", "replace").strip()
+
+
 def is_udp_probe(record):
     # Replies come *from* a well-known port (DNS answers from 53, QUIC from 443),
     # so only traffic from a high client port counts as probing.
@@ -52,12 +86,15 @@ def is_udp_probe(record):
 
 class SecurityMonitor:
     def __init__(self, scan_ports=15, sweep_hosts=10, window=10,
-                 flood_syns=100, flood_window=5, cooldown=60, max_alerts=200):
+                 flood_syns=100, flood_window=5, brute_attempts=20, brute_window=60,
+                 cooldown=60, max_alerts=200):
         self.scan_ports = scan_ports
         self.sweep_hosts = sweep_hosts
         self.window = window
         self.flood_syns = flood_syns
         self.flood_window = flood_window
+        self.brute_attempts = brute_attempts
+        self.brute_window = brute_window
         self.cooldown = cooldown
 
         self._lock = threading.Lock()
@@ -68,6 +105,9 @@ class SecurityMonitor:
         self._targets = {}              # src -> OrderedDict address -> last seen
         self._syns = {}                 # (dst, port) -> deque of SYN times
         self._arp = {}                  # IP -> MAC it last claimed
+        self._logins = {}               # (src, dst, port) -> deque of connection attempt times
+        self._users = {}                # connection -> (user name, last seen) from USER commands
+        self._prompted = {}             # Telnet connection -> (typed bytes, last seen) after "Password:"
         self._next_cleanup = None
         self.checked = 0
 
@@ -82,10 +122,21 @@ class SecurityMonitor:
              "description": "an IP address starts answering from a different MAC address"},
             {"rule": "cleartext", "name": "Cleartext protocols", "severity": "medium",
              "description": "Telnet, FTP, POP3, IMAP or HTTP send passwords and data unencrypted"},
+            {"rule": "brute_force", "name": "Brute-force login", "severity": "high",
+             "description": f"one source opens {brute_attempts}+ connections to SSH, RDP, FTP or another "
+                            f"login service within {brute_window} s"},
+            {"rule": "credentials", "name": "Password in clear text", "severity": "high",
+             "description": "a password is sent unencrypted over FTP, POP3, IMAP, Telnet or HTTP"},
         ]
 
-    def inspect(self, record):
-        """Run every rule on one packet record."""
+    @staticmethod
+    def wants_payload(record):
+        """Whether ``inspect`` needs this packet's TCP payload (to look for passwords)."""
+        return record["proto"] == "TCP" and (record["dport"] in CREDENTIAL_PORTS or
+                                             record["sport"] in CREDENTIAL_PORTS)
+
+    def inspect(self, record, payload=b""):
+        """Run every rule on one packet record (and its TCP payload, if given)."""
         with self._lock:
             self.checked += 1
             now = record["time"]
@@ -94,6 +145,9 @@ class SecurityMonitor:
             self._check_syn_flood(record, now)
             self._check_arp_spoof(record, now)
             self._check_cleartext(record, now)
+            self._check_brute_force(record, now)
+            if payload:
+                self._check_credentials(record, payload, now)
             if self._next_cleanup is None or now >= self._next_cleanup:
                 self._cleanup(now)
                 self._next_cleanup = now + self.window
@@ -173,6 +227,86 @@ class SecurityMonitor:
                     detail=f"{name} to {r['dst']}:{r['dport']} sends logins and data in clear text",
                     src=r["src"], dst=r["dst"], focus=r["src"])
 
+    def _check_brute_force(self, r, now):
+        if r["proto"] != "TCP" or r["flags"] != ["SYN"] or r["dport"] not in LOGIN_SERVICES:
+            return
+        key = (r["src"], r["dst"], r["dport"])
+        times = self._logins.setdefault(key, deque())
+        times.append(now)
+        while times[0] < now - self.brute_window:
+            times.popleft()
+        if len(times) >= self.brute_attempts:
+            service = LOGIN_SERVICES[r["dport"]]
+            self._alert("brute_force", "high", key, now,
+                        title=f"{service} brute force from {r['src']}",
+                        detail=f"{len(times)} login connections to {r['dst']}:{r['dport']} "
+                               f"within {self.brute_window} s",
+                        src=r["src"], dst=r["dst"], focus=r["src"])
+
+    def _check_credentials(self, r, payload, now):
+        to_server = r["dport"] in CREDENTIAL_PORTS
+        port = r["dport"] if to_server else r["sport"]
+        service = CREDENTIAL_PORTS[port]
+        if to_server:
+            conn = (r["src"], r["sport"], r["dst"], r["dport"])
+        else:
+            conn = (r["dst"], r["dport"], r["src"], r["sport"])
+
+        if service == "Telnet":
+            self._telnet(r, conn, to_server, payload, now)
+            return
+        if not to_server:
+            return
+
+        user = secret = None
+        if service in ("FTP", "POP3"):
+            if m := USER_COMMAND.search(payload):
+                self._users[conn] = (text(m.group(1)), now)
+            if m := PASS_COMMAND.search(payload):
+                secret = text(m.group(1))
+                user = self._users.pop(conn, (None, 0))[0]
+        elif service == "IMAP":
+            if m := IMAP_LOGIN.search(payload):
+                user, secret = text(m.group(1)), text(m.group(2))
+        else:   # HTTP
+            if m := BASIC_AUTH.search(payload):
+                try:
+                    decoded = base64.b64decode(m.group(1), validate=True)
+                except ValueError:
+                    return
+                user, _, secret = decoded.decode("utf-8", "replace").partition(":")
+            elif m := FORM_PASSWORD.search(payload):
+                secret = text(m.group(1))
+                user_match = FORM_USER.search(payload)
+                user = text(user_match.group(1)) if user_match else None
+        if secret:
+            self._password_alert(r, service, user, secret, now)
+
+    def _telnet(self, r, conn, to_server, payload, now):
+        """After the server prompts "Password:", collect what the client types up to Enter."""
+        if not to_server:
+            if b"password:" in payload.lower():
+                self._prompted[conn] = (b"", now)
+            return
+        if conn not in self._prompted:
+            return
+        typed = self._prompted[conn][0] + payload
+        if b"\r" in typed or b"\n" in typed or len(typed) > 128:
+            del self._prompted[conn]
+            secret = text(re.split(rb"[\r\n]", typed)[0])
+            if secret:
+                self._password_alert(r, "Telnet", None, secret, now)
+        else:
+            self._prompted[conn] = (typed, now)
+
+    def _password_alert(self, r, service, user, secret, now):
+        who = f"user '{user}'" if user else "a user"
+        self._alert("credentials", "high", (r["src"], r["dst"], r["dport"], user), now,
+                    title=f"{service} password sent in clear text",
+                    detail=f"{who} on {r['src']} logged in to {r['dst']}:{r['dport']} with "
+                           f"{describe_secret(secret)} that anyone on the network can read",
+                    src=r["src"], dst=r["dst"], focus=r["src"])
+
     # ---- helpers -----------------------------------------------------------
 
     @staticmethod
@@ -204,5 +338,10 @@ class SecurityMonitor:
                 del table[key]
         for key in [k for k, times in self._syns.items() if times[-1] < now - self.flood_window]:
             del self._syns[key]
+        for key in [k for k, times in self._logins.items() if times[-1] < now - self.brute_window]:
+            del self._logins[key]
+        for table in (self._users, self._prompted):
+            for key in [k for k, (_, seen) in table.items() if seen < now - self.cooldown]:
+                del table[key]
         for key in [k for k, a in self._open.items() if now - a["last_seen"] >= self.cooldown]:
             del self._open[key]
