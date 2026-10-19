@@ -26,6 +26,8 @@ class Tally:
         self.proto_bytes = Counter()
         self.host_packets = Counter()
         self.host_bytes = Counter()
+        self.app_packets = Counter()
+        self.app_bytes = Counter()
 
     def add(self, record):
         size = record["length"]
@@ -36,6 +38,9 @@ class Tally:
         for host in dict.fromkeys(h for h in (record["src"], record["dst"]) if h is not None):
             self.host_packets[host] += 1
             self.host_bytes[host] += size
+        if record.get("app"):
+            self.app_packets[record["app"]] += 1
+            self.app_bytes[record["app"]] += size
 
     def remove(self, other):
         # Counter's -= also drops entries that reach zero, so idle hosts disappear.
@@ -44,6 +49,8 @@ class Tally:
         self.proto_bytes -= other.proto_bytes
         self.host_packets -= other.host_packets
         self.host_bytes -= other.host_bytes
+        self.app_packets -= other.app_packets
+        self.app_bytes -= other.app_bytes
 
 
 class TrafficStore:
@@ -109,7 +116,7 @@ class TrafficStore:
     def packets_after(self, after_id=0, limit=200, match=None):
         return self.query(after_id, limit, match)["packets"]
 
-    def stats(self, top_hosts=5):
+    def stats(self, top_hosts=5, top_apps=6):
         with self._lock:
             self._expire()
             self._prune_window()
@@ -128,6 +135,10 @@ class TrafficStore:
             hosts = [
                 {"host": host, "bytes": size, "packets": recent.host_packets[host]}
                 for host, size in recent.host_bytes.most_common(top_hosts)
+            ]
+            apps = [
+                {"app": app, "bytes": size, "packets": recent.app_packets[app]}
+                for app, size in recent.app_bytes.most_common(top_apps)
             ]
             bandwidth = [
                 {
@@ -151,6 +162,7 @@ class TrafficStore:
                 "buffered": len(self._packets),
                 "protocols": protocols,
                 "top_hosts": hosts,
+                "top_apps": apps,
                 "bandwidth": bandwidth,
             }
 
