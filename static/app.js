@@ -1,4 +1,4 @@
-// Built by tools/build.py from static/app.jsx (sha256 08b5ca3fa3a698316cd5bcd2dbe53990e550046a711ea046a21d62a823b7e0d8).
+// Built by tools/build.py from static/app.jsx (sha256 f401d3c5c61b96b3d5d159754af7c0369a5a122d986cfb22adeba2710290b4f5).
 // Do not edit: change app.jsx, then run  python tools/build.py dashboard
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
@@ -476,9 +476,22 @@ function PacketTable({
   retention,
   capturing
 }) {
-  const rows = packets.slice(0, SHOW_ROWS);
+  const wrap = useRef(null);
+  const [held, setHeld] = useState(null);
+  const live = packets.slice(0, SHOW_ROWS);
+  const rows = held || live;
+  const newer = held ? packets.filter(p => p.id > (held[0]?.id ?? 0)).length : 0;
   const filtered = Object.values(filters).some(v => String(v).trim());
   const kept = retention ? ` · kept for ${formatRetention(retention)}` : "";
+  function onScroll(e) {
+    const away = e.currentTarget.scrollTop > 8;
+    if (away && !held) setHeld(live);else if (!away && held) setHeld(null);
+  }
+  function backToLive() {
+    if (wrap.current) wrap.current.scrollTop = 0;
+    setHeld(null);
+  }
+  useEffect(backToLive, [filterQuery(filters)]);
   return React.createElement("div", {
     className: "card",
     id: "packets"
@@ -495,8 +508,14 @@ function PacketTable({
     filters: filters,
     setFilters: setFilters,
     error: filterError
-  }), React.createElement("div", {
-    className: "table-wrap"
+  }), held && React.createElement("div", {
+    className: "held"
+  }, React.createElement("span", null, "Held still while you scroll", newer ? ` · ${newer >= KEEP_ROWS ? `${KEEP_ROWS}+` : newer} new packet${newer === 1 ? "" : "s"}` : ""), React.createElement("button", {
+    onClick: backToLive
+  }, "Back to live")), React.createElement("div", {
+    className: "table-wrap",
+    ref: wrap,
+    onScroll: onScroll
   }, React.createElement("table", null, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "TIME"), React.createElement("th", null, "SOURCE"), React.createElement("th", null, "DESTINATION"), React.createElement("th", null, "PROTO"), React.createElement("th", null, "SERVICE"), React.createElement("th", {
     className: "num"
   }, "BYTES"), React.createElement("th", null, "INFO"))), React.createElement("tbody", null, rows.map(p => React.createElement("tr", {
