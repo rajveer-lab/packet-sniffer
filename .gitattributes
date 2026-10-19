@@ -1,1 +1,2 @@
 *.pcap binary
+static/vendor/*.js -text
