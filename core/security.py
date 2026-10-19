@@ -222,9 +222,10 @@ class SecurityMonitor:
         if r["proto"] != "TCP" or r["dport"] not in CLEARTEXT or "PSH" not in r["flags"]:
             return
         name, severity = CLEARTEXT[r["dport"]]
+        used_by = f", used by {r['app']}" if r.get("app") else ""
         self._alert("cleartext", severity, (name, r["src"]), now,
                     title=f"Unencrypted {name} from {r['src']}",
-                    detail=f"{name} to {r['dst']}:{r['dport']} sends logins and data in clear text",
+                    detail=f"{name} to {r['dst']}:{r['dport']} sends logins and data in clear text{used_by}",
                     src=r["src"], dst=r["dst"], focus=r["src"])
 
     def _check_brute_force(self, r, now):
@@ -301,6 +302,8 @@ class SecurityMonitor:
 
     def _password_alert(self, r, service, user, secret, now):
         who = f"user '{user}'" if user else "a user"
+        if r.get("app"):
+            who += f" of {r['app']}"
         self._alert("credentials", "high", (r["src"], r["dst"], r["dport"], user), now,
                     title=f"{service} password sent in clear text",
                     detail=f"{who} on {r['src']} logged in to {r['dst']}:{r['dport']} with "
