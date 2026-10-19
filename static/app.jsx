@@ -408,9 +408,28 @@ function FilterBar({ filters, setFilters, error }) {
 }
 
 function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters, setFilters, filterError, retention, capturing }) {
-  const rows = packets.slice(0, SHOW_ROWS);
+  const wrap = useRef(null);
+  // Rows held still while the user has scrolled down to read them, so new
+  // packets arriving at the top do not push everything out of view.
+  const [held, setHeld] = useState(null);
+  const live = packets.slice(0, SHOW_ROWS);
+  const rows = held || live;
+  const newer = held ? packets.filter(p => p.id > (held[0]?.id ?? 0)).length : 0;
   const filtered = Object.values(filters).some(v => String(v).trim());
   const kept = retention ? ` · kept for ${formatRetention(retention)}` : "";
+
+  function onScroll(e) {
+    const away = e.currentTarget.scrollTop > 8;
+    if (away && !held) setHeld(live);
+    else if (!away && held) setHeld(null);
+  }
+  function backToLive() {
+    if (wrap.current) wrap.current.scrollTop = 0;
+    setHeld(null);
+  }
+  // A new filter starts again from the newest matching packets.
+  useEffect(backToLive, [filterQuery(filters)]);
+
   return (
     <div className="card" id="packets">
       <div className="card-head">
@@ -425,7 +444,13 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
         </button>
       </div>
       <FilterBar filters={filters} setFilters={setFilters} error={filterError} />
-      <div className="table-wrap">
+      {held && (
+        <div className="held">
+          <span>Held still while you scroll{newer ? ` · ${newer >= KEEP_ROWS ? `${KEEP_ROWS}+` : newer} new packet${newer === 1 ? "" : "s"}` : ""}</span>
+          <button onClick={backToLive}>Back to live</button>
+        </div>
+      )}
+      <div className="table-wrap" ref={wrap} onScroll={onScroll}>
         <table>
           <thead>
             <tr>
