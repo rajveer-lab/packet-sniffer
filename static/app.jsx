@@ -495,7 +495,7 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
                     TIME <span aria-hidden="true">{order === "newest" ? "▼" : "▲"}</span>
                   </button>
                 </th>
-                <th>SOURCE</th><th>DESTINATION</th><th>PROTO</th>
+                <th>APP</th><th>SOURCE</th><th>DESTINATION</th><th>PROTO</th>
                 <th>SERVICE</th><th className="num">BYTES</th><th>INFO</th>
               </tr>
             </thead>
@@ -507,6 +507,9 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
                   onClick={() => onSelect(p)}
                 >
                   <td className="time">{formatTime(p.time)}</td>
+                  <td className="program" title={p.app || "Program not known (another device, or a replayed file)"}>
+                    {p.app || <span className="none">&mdash;</span>}
+                  </td>
                   <td>{withPort(p.src, p.sport)}</td>
                   <td>{withPort(p.dst, p.dport)}</td>
                   <td><span className={`badge p-${protoClass(p.proto)}`}>{p.proto}</span></td>
@@ -609,6 +612,40 @@ function Protocols({ protocols, retention, onPick, picked }) {
   );
 }
 
+function TopApps({ apps, retention, enabled, onPick, picked }) {
+  const list = apps || [];
+  const max = Math.max(1, ...list.map(a => a.bytes));
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div className="label">Top applications</div>
+        <div className="muted">programs on this computer{retention ? `, last ${formatRetention(retention)}` : ""}</div>
+      </div>
+      <div className="hosts">
+        {list.map(a => (
+          <button
+            className={`host app-row${picked === a.app ? " on" : ""}`}
+            key={a.app}
+            onClick={() => onPick(picked === a.app ? "" : a.app)}
+            title={picked === a.app ? "Show every program" : `${a.packets.toLocaleString()} packets. Click to show only ${a.app}.`}
+          >
+            <span className="name">{a.app}</span>
+            <span className="bar"><div style={{ width: `${(100 * a.bytes) / max}%` }} /></span>
+            <span className="size">{formatBytes(a.bytes)}</span>
+          </button>
+        ))}
+        {!list.length && (
+          <div className="muted">
+            {enabled === false
+              ? "Shown during live capture. A replayed file does not say which program sent each packet."
+              : "No programs named yet."}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TopHosts({ hosts, retention, onPick }) {
   const list = hosts || [];
   const max = Math.max(1, ...list.map(h => h.bytes));
@@ -640,6 +677,12 @@ function PacketDetails({ packet }) {
       {!packet && <div className="muted">Click a packet to see its headers decoded layer by layer.</div>}
       {packet && (
         <div>
+          {packet.app && (
+            <div className="layer l-app">
+              <div className="name">PROGRAM</div>
+              <div className="body">{packet.app}<br /><span>sent or received by this program on this computer</span></div>
+            </div>
+          )}
           {packet.src_mac && (
             <div className="layer l-link">
               <div className="name">ETHERNET</div>
@@ -736,6 +779,13 @@ function App() {
             retention={retention}
             picked={filters.proto}
             onPick={proto => setFilters(f => ({ ...f, proto }))}
+          />
+          <TopApps
+            apps={stats?.top_apps}
+            retention={retention}
+            enabled={capture?.apps}
+            picked={filters.q}
+            onPick={app => setFilters({ ...NO_FILTERS, q: app })}
           />
           <TopHosts hosts={stats?.top_hosts} retention={retention} onPick={focusHost} />
         </div>
