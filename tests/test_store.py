@@ -110,3 +110,18 @@ def test_query_filters_packets_and_reports_the_newest_id():
     result = store.query(0, match=lambda p: p["proto"] == "UDP")
     assert [p["id"] for p in result["packets"]] == [2]
     assert result["last_id"] == 3          # next poll starts after every scanned packet
+
+
+def test_top_applications_over_the_retention_period():
+    clock = FakeClock(1000.0)
+    store = TrafficStore(retention_seconds=30, clock=clock)
+    store.add(dict(record(1000, length=1500), app="chrome.exe"))
+    store.add(dict(record(1000, length=1500), app="chrome.exe"))
+    store.add(dict(record(1000, length=200), app="Spotify.exe"))
+    store.add(dict(record(1000, length=900), app=None))      # unnamed packets are not listed
+    assert store.stats()["top_apps"] == [
+        {"app": "chrome.exe", "bytes": 3000, "packets": 2},
+        {"app": "Spotify.exe", "bytes": 200, "packets": 1},
+    ]
+    clock.now = 1100.0
+    assert store.stats()["top_apps"] == []
