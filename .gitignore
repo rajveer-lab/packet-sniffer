@@ -9,3 +9,7 @@ __pycache__/
 
 # Packets saved with --save
 captures/
+
+# Build output (python tools/build.py)
+build/
+dist/
