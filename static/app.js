@@ -1,4 +1,4 @@
-// Built by tools/build.py from static/app.jsx (sha256 f401d3c5c61b96b3d5d159754af7c0369a5a122d986cfb22adeba2710290b4f5).
+// Built by tools/build.py from static/app.jsx (sha256 d463736cf586608bebcec70d698f5a9552bd65f46b99919feacd08f170b7ffc4).
 // Do not edit: change app.jsx, then run  python tools/build.py dashboard
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
@@ -392,11 +392,11 @@ function BandwidthChart({
       left: Math.min(Math.max(x(h), 90), width - 90),
       top: Math.max(y(data[h].bytes) - 64, 0)
     }
-  }, React.createElement("b", null, formatBytes(data[h].bytes), "/s"), React.createElement("span", null, data[h].packets.toLocaleString(), " packets \xB7 ", formatTime(data[h].t))), React.createElement("table", {
+  }, React.createElement("b", null, formatBytes(data[h].bytes), "/s"), React.createElement("span", null, data[h].packets.toLocaleString(), " packets \xB7 ", formatTime(data[h].t))), React.createElement("div", {
     className: "sr-only"
-  }, React.createElement("caption", null, "Bytes and packets per second, last minute"), React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Time"), React.createElement("th", null, "Bytes"), React.createElement("th", null, "Packets"))), React.createElement("tbody", null, data.map(d => React.createElement("tr", {
+  }, React.createElement("table", null, React.createElement("caption", null, "Bytes and packets per second, last minute"), React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Time"), React.createElement("th", null, "Bytes"), React.createElement("th", null, "Packets"))), React.createElement("tbody", null, data.map(d => React.createElement("tr", {
     key: d.t
-  }, React.createElement("td", null, formatTime(d.t)), React.createElement("td", null, d.bytes), React.createElement("td", null, d.packets)))))));
+  }, React.createElement("td", null, formatTime(d.t)), React.createElement("td", null, d.bytes), React.createElement("td", null, d.packets))))))));
 }
 function FilterBar({
   filters,
@@ -477,21 +477,46 @@ function PacketTable({
   capturing
 }) {
   const wrap = useRef(null);
+  const [order, setOrder] = useState("newest");
   const [held, setHeld] = useState(null);
   const live = packets.slice(0, SHOW_ROWS);
-  const rows = held || live;
+  const newestFirst = held || live;
+  const rows = order === "newest" ? newestFirst : [...newestFirst].reverse();
   const newer = held ? packets.filter(p => p.id > (held[0]?.id ?? 0)).length : 0;
   const filtered = Object.values(filters).some(v => String(v).trim());
   const kept = retention ? ` · kept for ${formatRetention(retention)}` : "";
+  function fromLiveEnd(el) {
+    return order === "newest" ? el.scrollTop : el.scrollHeight - el.clientHeight - el.scrollTop;
+  }
+  function jumpToLiveEnd() {
+    const el = wrap.current;
+    if (el) el.scrollTop = order === "newest" ? 0 : el.scrollHeight;
+  }
   function onScroll(e) {
-    const away = e.currentTarget.scrollTop > 8;
+    const away = fromLiveEnd(e.currentTarget) > 8;
     if (away && !held) setHeld(live);else if (!away && held) setHeld(null);
   }
   function backToLive() {
-    if (wrap.current) wrap.current.scrollTop = 0;
     setHeld(null);
+    jumpToLiveEnd();
   }
+  function toggleOrder() {
+    setHeld(null);
+    setOrder(o => o === "newest" ? "oldest" : "newest");
+  }
+  useLayoutEffect(jumpToLiveEnd, [order]);
+  const lastHeight = useRef(0);
+  useLayoutEffect(() => {
+    const el = wrap.current;
+    if (!el) return;
+    if (order === "oldest") {
+      const grew = Math.max(0, el.scrollHeight - lastHeight.current);
+      if (fromLiveEnd(el) <= grew + 8) el.scrollTop = el.scrollHeight;
+    }
+    lastHeight.current = el.scrollHeight;
+  }, [rows]);
   useEffect(backToLive, [filterQuery(filters)]);
+  const waiting = newer ? ` · ${newer >= KEEP_ROWS ? `${KEEP_ROWS}+` : newer} new packet${newer === 1 ? "" : "s"}` : "";
   return React.createElement("div", {
     className: "card",
     id: "packets"
@@ -501,22 +526,33 @@ function PacketTable({
     className: "label"
   }, "Live packets"), React.createElement("div", {
     className: "muted"
-  }, filtered ? `${rows.length} matching · ` : "", "Newest first", kept, " \xB7 click a row to see its headers")), React.createElement("button", {
+  }, filtered ? `${rows.length} matching · ` : "", order === "newest" ? "Newest" : "Oldest", " first", kept, " \xB7 click a row to see its headers")), React.createElement("button", {
     className: paused ? "paused" : "",
     onClick: () => setPaused(!paused)
   }, paused ? "Resume" : "Pause")), React.createElement(FilterBar, {
     filters: filters,
     setFilters: setFilters,
     error: filterError
-  }), held && React.createElement("div", {
-    className: "held"
-  }, React.createElement("span", null, "Held still while you scroll", newer ? ` · ${newer >= KEEP_ROWS ? `${KEEP_ROWS}+` : newer} new packet${newer === 1 ? "" : "s"}` : ""), React.createElement("button", {
+  }), React.createElement("div", {
+    className: "table-area"
+  }, held && React.createElement("div", {
+    className: `held ${order === "newest" ? "at-top" : "at-bottom"}`,
+    role: "status"
+  }, React.createElement("span", null, "Held still while you scroll", waiting), React.createElement("button", {
     onClick: backToLive
   }, "Back to live")), React.createElement("div", {
     className: "table-wrap",
     ref: wrap,
     onScroll: onScroll
-  }, React.createElement("table", null, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "TIME"), React.createElement("th", null, "SOURCE"), React.createElement("th", null, "DESTINATION"), React.createElement("th", null, "PROTO"), React.createElement("th", null, "SERVICE"), React.createElement("th", {
+  }, React.createElement("table", null, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", {
+    "aria-sort": order === "newest" ? "descending" : "ascending"
+  }, React.createElement("button", {
+    className: "sort",
+    onClick: toggleOrder,
+    title: order === "newest" ? "Showing newest first. Click for oldest first." : "Showing oldest first. Click for newest first."
+  }, "TIME ", React.createElement("span", {
+    "aria-hidden": "true"
+  }, order === "newest" ? "▼" : "▲"))), React.createElement("th", null, "SOURCE"), React.createElement("th", null, "DESTINATION"), React.createElement("th", null, "PROTO"), React.createElement("th", null, "SERVICE"), React.createElement("th", {
     className: "num"
   }, "BYTES"), React.createElement("th", null, "INFO"))), React.createElement("tbody", null, rows.map(p => React.createElement("tr", {
     key: p.id,
@@ -532,7 +568,7 @@ function PacketTable({
     className: "info"
   }, p.info))))), !rows.length && React.createElement("div", {
     className: "empty"
-  }, filtered ? "No packets match these filters yet." : capturing ? React.createElement(React.Fragment, null, "Waiting for packets\u2026 open a website to generate some traffic.") : `Capture has stopped, and packets older than ${formatRetention(retention)} have decayed.`)));
+  }, filtered ? "No packets match these filters yet." : capturing ? React.createElement(React.Fragment, null, "Waiting for packets\u2026 open a website to generate some traffic.") : `Capture has stopped, and packets older than ${formatRetention(retention)} have decayed.`))));
 }
 function SecurityPanel({
   security,
