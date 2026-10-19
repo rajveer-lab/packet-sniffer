@@ -9,6 +9,8 @@ API with Flask:
     GET /api/stats      totals, protocol share, top hosts, bandwidth, capture status
     GET /api/alerts     security alerts and the checks that raise them
 
+The dashboard and API need the access code printed at startup (see core/access.py).
+
 Usage:
     python sniffer.py                          capture on the default interface
     python sniffer.py --iface "Wi-Fi"          capture on a chosen interface
@@ -24,10 +26,14 @@ Usage:
 import argparse
 import logging
 import os
+import sys
 import time
+import webbrowser
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from core import __version__
+from core.access import add_security_headers, new_token, protect
 from core.capture import PacketPipeline
 from core.filters import build_filter
 from core.recorder import RotatingPcapWriter
@@ -37,8 +43,12 @@ from core.store import TrafficStore
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
-def create_app(store, pipeline=None, monitor=None):
+def create_app(store, pipeline=None, monitor=None, token=None):
+    """The Flask app; with a ``token``, the dashboard and API need that access code."""
     app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
+    app.after_request(add_security_headers)
+    if token:
+        protect(app, token)
 
     @app.get("/")
     def dashboard():
@@ -64,6 +74,7 @@ def create_app(store, pipeline=None, monitor=None):
     def stats():
         data = store.stats()
         data["capture"] = pipeline.status() if pipeline else None
+        data["version"] = __version__
         return jsonify(data)
 
     @app.get("/api/alerts")
@@ -115,6 +126,13 @@ def parse_args():
     saving.add_argument("--keep-files", type=int, default=5, metavar="N",
                         help="keep only the newest N files, deleting older ones (default 5)")
     parser.add_argument("--no-security", action="store_true", help="turn off the security checks")
+
+    access = parser.add_argument_group("access", "who may open the dashboard")
+    access.add_argument("--token", help="access code for the dashboard (default: a new random one each run)")
+    access.add_argument("--no-auth", action="store_true",
+                        help="open the dashboard without an access code (only on a computer you trust)")
+    access.add_argument("--open", action="store_true", help="open the dashboard in the browser at startup")
+    parser.add_argument("--version", action="version", version=f"Packet Sniffer {__version__}")
     parser.add_argument("--print", dest="print_packets", action="store_true",
                         help="also print every packet in the terminal")
     return parser.parse_args()
@@ -157,13 +175,24 @@ def main():
         print(f"Saving to: {os.path.abspath(args.save)}  ({args.file_size:g} MB files, newest {args.keep_files} kept)")
     print("Security checks: " + ("off" if monitor is None else "on"))
 
-    host = "localhost" if args.host in ("127.0.0.1", "localhost") else args.host
-    print(f"Dashboard: http://{host}:{args.port}")
+    token = None if args.no_auth else (args.token or new_token())
+    local = args.host in ("127.0.0.1", "localhost", "::1")
+    host = "localhost" if local else args.host
+    url = f"http://{host}:{args.port}/" + (f"?token={token}" if token else "")
+    print(f"Dashboard: {url}")
+    if token:
+        print(f"Access code: {token}  (anyone with it can see the captured traffic)")
+    elif not local:
+        print("WARNING: no access code, and the dashboard is reachable from other computers.")
+
+    # A double-clicked PacketSniffer.exe (no options) opens the browser itself.
+    if args.open or (getattr(sys, "frozen", False) and len(sys.argv) == 1):
+        webbrowser.open(url)
 
     # Flask logs every request, and the dashboard polls twice a second.
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     try:
-        create_app(store, pipeline, monitor).run(host=args.host, port=args.port, threaded=True)
+        create_app(store, pipeline, monitor, token).run(host=args.host, port=args.port, threaded=True)
     finally:
         pipeline.stop()   # closes the current .pcap file cleanly
 
