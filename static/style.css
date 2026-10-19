@@ -215,7 +215,21 @@ button:focus-visible, input:focus-visible, .chart:focus-visible { outline: 2px s
 .filter-error { width: 100%; color: var(--red); font-size: 12px; }
 
 /* Packet table */
-.table-wrap { overflow: auto; max-height: 560px; border-top: 1px solid var(--line); }
+/* At most 560px, and never more than ~60% of the window, so the table cannot take over the screen */
+.table-wrap { overflow: auto; max-height: min(560px, 60vh); min-height: 220px; border-top: 1px solid var(--line); overflow-anchor: none; }
+.held {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  background: var(--orange-tint);
+  color: #5e3d07;
+  font-size: 12.5px;
+}
+.held button { background: var(--card); border-color: var(--orange); white-space: nowrap; }
 table { width: 100%; border-collapse: collapse; font: 12.5px var(--mono); }
 thead th {
   position: sticky;
