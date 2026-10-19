@@ -1,4 +1,4 @@
-// Built by tools/build.py from static/app.jsx (sha256 d463736cf586608bebcec70d698f5a9552bd65f46b99919feacd08f170b7ffc4).
+// Built by tools/build.py from static/app.jsx (sha256 7bb7628ef78fc6c2ddb47dc582a9fc5db59e688a69a690be41f5f7bed4d3208c).
 // Do not edit: change app.jsx, then run  python tools/build.py dashboard
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
@@ -552,7 +552,7 @@ function PacketTable({
     title: order === "newest" ? "Showing newest first. Click for oldest first." : "Showing oldest first. Click for newest first."
   }, "TIME ", React.createElement("span", {
     "aria-hidden": "true"
-  }, order === "newest" ? "▼" : "▲"))), React.createElement("th", null, "SOURCE"), React.createElement("th", null, "DESTINATION"), React.createElement("th", null, "PROTO"), React.createElement("th", null, "SERVICE"), React.createElement("th", {
+  }, order === "newest" ? "▼" : "▲"))), React.createElement("th", null, "APP"), React.createElement("th", null, "SOURCE"), React.createElement("th", null, "DESTINATION"), React.createElement("th", null, "PROTO"), React.createElement("th", null, "SERVICE"), React.createElement("th", {
     className: "num"
   }, "BYTES"), React.createElement("th", null, "INFO"))), React.createElement("tbody", null, rows.map(p => React.createElement("tr", {
     key: p.id,
@@ -560,7 +560,12 @@ function PacketTable({
     onClick: () => onSelect(p)
   }, React.createElement("td", {
     className: "time"
-  }, formatTime(p.time)), React.createElement("td", null, withPort(p.src, p.sport)), React.createElement("td", null, withPort(p.dst, p.dport)), React.createElement("td", null, React.createElement("span", {
+  }, formatTime(p.time)), React.createElement("td", {
+    className: "program",
+    title: p.app || "Program not known (another device, or a replayed file)"
+  }, p.app || React.createElement("span", {
+    className: "none"
+  }, "\u2014")), React.createElement("td", null, withPort(p.src, p.sport)), React.createElement("td", null, withPort(p.dst, p.dport)), React.createElement("td", null, React.createElement("span", {
     className: `badge p-${protoClass(p.proto)}`
   }, p.proto)), React.createElement("td", null, p.service || ""), React.createElement("td", {
     className: "num"
@@ -681,6 +686,44 @@ function Protocols({
     className: "muted"
   }, "No packets yet.")));
 }
+function TopApps({
+  apps,
+  retention,
+  enabled,
+  onPick,
+  picked
+}) {
+  const list = apps || [];
+  const max = Math.max(1, ...list.map(a => a.bytes));
+  return React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-head"
+  }, React.createElement("div", {
+    className: "label"
+  }, "Top applications"), React.createElement("div", {
+    className: "muted"
+  }, "programs on this computer", retention ? `, last ${formatRetention(retention)}` : "")), React.createElement("div", {
+    className: "hosts"
+  }, list.map(a => React.createElement("button", {
+    className: `host app-row${picked === a.app ? " on" : ""}`,
+    key: a.app,
+    onClick: () => onPick(picked === a.app ? "" : a.app),
+    title: picked === a.app ? "Show every program" : `${a.packets.toLocaleString()} packets. Click to show only ${a.app}.`
+  }, React.createElement("span", {
+    className: "name"
+  }, a.app), React.createElement("span", {
+    className: "bar"
+  }, React.createElement("div", {
+    style: {
+      width: `${100 * a.bytes / max}%`
+    }
+  })), React.createElement("span", {
+    className: "size"
+  }, formatBytes(a.bytes)))), !list.length && React.createElement("div", {
+    className: "muted"
+  }, enabled === false ? "Shown during live capture. A replayed file does not say which program sent each packet." : "No programs named yet.")));
+}
 function TopHosts({
   hosts,
   retention,
@@ -730,7 +773,13 @@ function PacketDetails({
     className: "muted"
   }, "#", packet.id)), !packet && React.createElement("div", {
     className: "muted"
-  }, "Click a packet to see its headers decoded layer by layer."), packet && React.createElement("div", null, packet.src_mac && React.createElement("div", {
+  }, "Click a packet to see its headers decoded layer by layer."), packet && React.createElement("div", null, packet.app && React.createElement("div", {
+    className: "layer l-app"
+  }, React.createElement("div", {
+    className: "name"
+  }, "PROGRAM"), React.createElement("div", {
+    className: "body"
+  }, packet.app, React.createElement("br", null), React.createElement("span", null, "sent or received by this program on this computer"))), packet.src_mac && React.createElement("div", {
     className: "layer l-link"
   }, React.createElement("div", {
     className: "name"
@@ -836,6 +885,15 @@ function App() {
       ...f,
       proto
     }))
+  }), React.createElement(TopApps, {
+    apps: stats?.top_apps,
+    retention: retention,
+    enabled: capture?.apps,
+    picked: filters.q,
+    onPick: app => setFilters({
+      ...NO_FILTERS,
+      q: app
+    })
   }), React.createElement(TopHosts, {
     hosts: stats?.top_hosts,
     retention: retention,
