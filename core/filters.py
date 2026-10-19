@@ -8,7 +8,7 @@ changed at any time without restarting capture.
     host=192.168.1.5        packets to or from this IP or MAC address
     host=192.168.1.0/24     packets to or from any address in this subnet
     port=443                packets to or from this port
-    q=dns                   text anywhere in the row (addresses, service, info)
+    q=dns                   text anywhere in the row (addresses, program, service, info)
 
 All given conditions must match.
 """
@@ -56,7 +56,7 @@ def _text_test(text):
 
     def row_text(r):
         parts = (r.get("src"), r.get("dst"), r.get("sport"), r.get("dport"), r["proto"],
-                 r.get("service"), r.get("info"), *r.get("flags", []))
+                 r.get("app"), r.get("service"), r.get("info"), *r.get("flags", []))
         return " ".join(str(p) for p in parts if p is not None).lower()
 
     return lambda r: needle in row_text(r)
