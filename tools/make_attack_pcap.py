@@ -1,4 +1,4 @@
-"""Generate samples/attack_traffic.pcap: about 20 seconds of a home network
+"""Generate samples/attack_traffic.pcap: about 22 seconds of a home network
 under attack, to demonstrate every security check without attacking anyone.
 
 The packets are crafted with Scapy and only written to a file; nothing is
@@ -11,8 +11,9 @@ sent on the network. Replay it with:
     5 s   attacker SYN-scans 150 ports on the laptop           -> Port scan
     9 s   attacker claims to be the router in ARP replies      -> ARP spoofing
    12 s   150 spoofed SYNs hit the NAS's web server            -> SYN flood
-   15 s   laptop logs in to the NAS over Telnet and FTP,
-          and fetches a page over plain HTTP                    -> Cleartext
+   15 s   laptop logs in to the NAS over Telnet and FTP, and   -> Cleartext,
+          to a website through a plain-HTTP login form             Password in clear text
+   18 s   attacker tries 30 SSH logins on the NAS              -> Brute-force login
 
 Run:  python tools/make_attack_pcap.py [output.pcap]
 """
@@ -104,7 +105,18 @@ def build():
     b.add(17.05, b.inbound(VIDEO_SITE, LAPTOP) / TCP(sport=80, dport=50102, flags="SA"))
     b.add(17.06, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="A"))
     b.add(17.07, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="PA")
-          / Raw(b"GET /login HTTP/1.1\r\nHost: video.example.com\r\n\r\n"))
+          / Raw(b"POST /login HTTP/1.1\r\nHost: video.example.com\r\n"
+                b"Content-Type: application/x-www-form-urlencoded\r\n\r\n"
+                b"username=rajveer&password=hunter22"))
+
+    # Brute force: a new SSH connection every 0.1 s, each one reset after a failed guess
+    for i in range(30):
+        t = 18.0 + i * 0.1
+        sport = 42000 + i
+        b.add(t, lan(ATTACKER, NAS) / TCP(sport=sport, dport=22, flags="S"))
+        b.add(t + 0.002, lan(NAS, ATTACKER) / TCP(sport=22, dport=sport, flags="SA"))
+        b.add(t + 0.003, lan(ATTACKER, NAS) / TCP(sport=sport, dport=22, flags="A"))
+        b.add(t + 0.05, lan(NAS, ATTACKER) / TCP(sport=22, dport=sport, flags="RA"))
 
     b.packets.sort(key=lambda p: p.time)
     return b.packets
