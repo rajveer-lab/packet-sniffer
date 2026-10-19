@@ -1,3 +1,5 @@
+import base64
+
 from core.security import SecurityMonitor
 
 ATTACKER = "192.168.1.66"
@@ -99,6 +101,62 @@ def test_cleartext_logins_but_not_scans_of_those_ports():
     ]
 
 
+def test_brute_force_on_a_login_service():
+    monitor = SecurityMonitor(brute_attempts=20, brute_window=60)
+    normal = [rec(100 + i, src=LAPTOP, dst="192.168.1.20", sport=50000 + i, dport=22) for i in range(5)]
+    assert feed(monitor, normal)["alerts"] == []                 # a few SSH sessions are fine
+    attack = [rec(200 + i * 0.5, sport=42000 + i, dst="192.168.1.20", dport=22) for i in range(25)]
+    s = feed(monitor, attack)
+    assert rules_fired(s) == ["brute_force"]
+    assert s["alerts"][0]["title"] == f"SSH brute force from {ATTACKER}"
+    assert s["alerts"][0]["count"] == 6
+
+
+SECRET = "s3cr3t-Pa55"
+
+
+def login(monitor, dport, *payloads, sport=50300, server="192.168.1.20", start=100):
+    """Feed a TCP conversation; payloads starting with '<' come from the server."""
+    for i, payload in enumerate(payloads):
+        from_server = payload.startswith(b"<")
+        record = rec(start + i * 0.1, src=server if from_server else LAPTOP, dst=LAPTOP if from_server else server,
+                     sport=dport if from_server else sport, dport=sport if from_server else dport,
+                     flags=("PSH", "ACK"))
+        assert monitor.wants_payload(record)
+        monitor.inspect(record, payload[1:] if from_server else payload)
+    return [a for a in monitor.summary()["alerts"] if a["rule"] == "credentials"]
+
+
+def test_passwords_in_clear_text_are_detected_but_never_shown():
+    basic = base64.b64encode(f"admin:{SECRET}".encode())
+    cases = {
+        "FTP": login(SecurityMonitor(), 21, b"<220 ready\r\n", b"USER backup\r\n", b"PASS " + SECRET.encode() + b"\r\n"),
+        "POP3": login(SecurityMonitor(), 110, b"USER mail\r\n", b"PASS " + SECRET.encode() + b"\r\n"),
+        "IMAP": login(SecurityMonitor(), 143, b'a001 LOGIN mail "' + SECRET.encode() + b'"\r\n'),
+        "HTTP basic": login(SecurityMonitor(), 80, b"GET / HTTP/1.1\r\nAuthorization: Basic " + basic + b"\r\n\r\n"),
+        "HTTP form": login(SecurityMonitor(), 8080, b"POST /login HTTP/1.1\r\n\r\nuser=amy&password=" + SECRET.encode()),
+        # Telnet clients send what is typed one key at a time
+        "Telnet": login(SecurityMonitor(), 23, b"<login: ", b"amy\r\n", b"<Password: ",
+                        *[c.encode() for c in SECRET], b"\r\n"),
+    }
+    users = {"FTP": "backup", "POP3": "mail", "IMAP": "mail", "HTTP basic": "admin", "HTTP form": "amy", "Telnet": None}
+    for case, alerts in cases.items():
+        assert len(alerts) == 1, case
+        alert = alerts[0]
+        assert alert["severity"] == "high"
+        assert "an 11-character password" in alert["detail"], case
+        assert (f"user '{users[case]}'" if users[case] else "a user") in alert["detail"], case
+        assert SECRET not in str(alert), case
+
+
+def test_only_cleartext_login_traffic_is_opened_up():
+    assert not SecurityMonitor.wants_payload(rec(100, dport=443, flags=("PSH", "ACK")))
+    assert not SecurityMonitor.wants_payload(rec(100, proto="UDP", dport=53))
+    assert SecurityMonitor.wants_payload(rec(100, sport=21, dport=50000, flags=("PSH", "ACK")))
+    # Ordinary web pages are not logins
+    assert login(SecurityMonitor(), 80, b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n") == []
+
+
 def test_a_quiet_alert_reopens_after_the_cooldown():
     def scan(start):
         return [rec(start + i * 0.05, dport=p) for i, p in enumerate(range(1, 20))]
@@ -123,19 +181,20 @@ def test_tracking_state_is_cleaned_up():
 def replay_sample(name):
     from scapy.utils import PcapReader
 
-    from core.parser import parse_packet
+    from core.parser import parse_packet, tcp_payload
 
     monitor = SecurityMonitor()
     with PcapReader(f"samples/{name}") as reader:
         for pkt in reader:
-            monitor.inspect(parse_packet(pkt))
+            record = parse_packet(pkt)
+            monitor.inspect(record, tcp_payload(pkt) if monitor.wants_payload(record) else b"")
     return monitor.summary()
 
 
 def test_attack_sample_triggers_every_check():
     s = replay_sample("attack_traffic.pcap")
     assert sorted(set(rules_fired(s))) == sorted(r["rule"] for r in s["rules"])
-    assert s["counts"] == {"high": 3, "medium": 3, "low": 1}
+    assert s["counts"] == {"high": 7, "medium": 3, "low": 1}
 
 
 def test_normal_home_traffic_raises_no_alerts():
