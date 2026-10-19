@@ -157,6 +157,13 @@ def test_only_cleartext_login_traffic_is_opened_up():
     assert login(SecurityMonitor(), 80, b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n") == []
 
 
+def test_alerts_name_the_program_when_known():
+    monitor = SecurityMonitor()
+    monitor.inspect(rec(100, src=LAPTOP, dst="203.0.113.10", sport=50200, dport=80, flags=("PSH", "ACK"),
+                        app="chrome.exe"))
+    assert monitor.summary()["alerts"][0]["detail"].endswith("in clear text, used by chrome.exe")
+
+
 def test_a_quiet_alert_reopens_after_the_cooldown():
     def scan(start):
         return [rec(start + i * 0.05, dport=p) for i, p in enumerate(range(1, 20))]
