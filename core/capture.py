@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from .parser import parse_packet
+from .parser import parse_packet, tcp_payload
 
 
 def interface_name(iface=None):
@@ -115,7 +115,9 @@ class PacketPipeline:
                 self._count("parse_errors")
                 continue
             if self.monitor:
-                self.monitor.inspect(record)
+                # Only packets of cleartext login protocols are opened up and read.
+                payload = tcp_payload(pkt) if self.monitor.wants_payload(record) else b""
+                self.monitor.inspect(record, payload)
             if self.recorder:
                 self.recorder.write(pkt)
             if self.on_record:
