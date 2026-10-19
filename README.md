@@ -2,7 +2,8 @@
 
 Computer Networks project (team Big Packet). The sniffer captures live packets from a
 network interface, decodes the Ethernet, IP, TCP and UDP headers, and shows the
-traffic on a web dashboard that refreshes every second. It filters the packet table,
+traffic on a web dashboard that refreshes every second. It names the program on this
+computer behind each packet (chrome.exe, Spotify.exe, ...), filters the packet table,
 checks every packet for common attacks and for passwords sent in clear text, keeps
 the dashboard locked behind an access code, and lets old data decay so it can run for
 hours without filling memory or disk.
@@ -58,6 +59,7 @@ If no packets appear on Windows, run the terminal as Administrator.
 | `--save [FOLDER]` | also save packets to rotating .pcap files (default folder `captures`) |
 | `--file-size 10 --keep-files 5` | with `--save`: new file every 10 MB, keep only the newest 5 |
 | `--no-security` | turn off the security checks |
+| `--no-apps` | do not name the program behind each packet |
 | `--token CODE` | choose the dashboard access code (default: a new random one each run) |
 | `--no-auth` | no access code (only on a computer you trust) |
 | `--open` | open the dashboard in the browser at startup |
@@ -95,12 +97,35 @@ which only write a file and send nothing on the network.
   Click **TIME** to sort newest first or oldest first (new packets then arrive at the
   bottom, as in Wireshark). Scrolling into the table holds its rows still so they can be
   read; **Back to live** returns to the newest packets.
-- **Packet details**: click a row to see its headers decoded layer by layer.
+- **APP column** and **Top applications**: the program on this computer that sent or
+  received each packet, and which programs use the most traffic. Click a program to see
+  only its packets.
+- **Packet details**: click a row to see its program and headers, layer by layer.
 - **Security**: the seven checks with their status, and the alerts they raised.
 - **Protocols** and **Top hosts**: shares over the retention period (5 minutes by default).
 
 The protocol buttons and other table filters only change what is shown, so they can be
 changed at any time. The BPF `--filter` decides what is captured in the first place.
+
+## Which program sent it?
+
+Packets do not carry the name of the program that sent them, so during live capture the
+sniffer asks the operating system instead (`core/processes.py`). Windows keeps a table
+of open connections and the process that owns each one, the table `netstat -ano`
+prints. It is read with psutil once a second (it takes a few milliseconds), and again
+straight away when a new connection of this computer shows up:
+
+```
+TCP  172.17.76.96:53684 -> 104.18.32.47:443    chrome.exe
+UDP  0.0.0.0:5353                              svchost.exe
+```
+
+Each packet is matched by its local address and port. A connection that has just
+closed is remembered for a minute so its last packets are still named. On a test run
+98% of the laptop's own TCP and UDP packets were named. The rest show "&mdash;": other
+devices' broadcasts (no program here sent them), ICMP and ARP (they have no ports), and
+connections that opened and closed between two reads. Replayed files never have names.
+No administrator rights are needed.
 
 ## Security checks
 
@@ -177,6 +202,9 @@ The sniffer never keeps collecting forever:
       +--> [SecurityMonitor]  port scan, host sweep, SYN flood, ARP spoofing, cleartext,
       |                       brute force, passwords (reads cleartext login payloads only)
       +--> [RotatingPcapWriter]  optional .pcap files, oldest deleted
+      ^
+      |    [ProcessMap]   names the program behind each record, from the
+      |                   OS connection table (live capture only)
       |
  [Flask API]       GET /api/packets   GET /api/stats   GET /api/alerts
       |            behind the access code; strict security headers
@@ -194,6 +222,7 @@ The sniffer never keeps collecting forever:
 | `core/filters.py` | protocol, host, subnet, port and text filters for the table |
 | `core/security.py` | the seven security checks and their alerts |
 | `core/recorder.py` | saves packets to rotating .pcap files |
+| `core/processes.py` | names the program on this computer behind each packet |
 | `core/access.py` | access code, lockout and security headers for the dashboard |
 | `static/app.jsx` | dashboard source (React) |
 | `static/app.js` | the same, compiled to plain JavaScript by `tools/build.py` |
@@ -216,13 +245,14 @@ value returns 400 with an `error` message.
   "dst": "203.0.113.10", "proto": "TCP", "sport": 52344, "dport": 443,
   "service": "HTTPS", "flags": ["SYN"], "length": 66, "ttl": 64, "ip_version": 4,
   "src_mac": "3c:22:fb:12:34:56", "dst_mac": "00:1a:2b:3c:4d:5e",
-  "icmp_type": null, "arp_op": null, "arp_mac": null, "info": "52344 -> 443 [SYN]"}]}
+  "icmp_type": null, "arp_op": null, "arp_mac": null, "app": "chrome.exe",
+  "info": "52344 -> 443 [SYN]"}]}
 ```
 
 `last_id` is the newest packet the server has, so the next request asks `after` it even
 when a filter hid some packets.
 
-`GET /api/stats` returns totals, current speed, protocol share, top hosts, the last
+`GET /api/stats` returns totals, current speed, protocol share, top hosts, top programs, the last
 60 seconds of bandwidth, the retention period, the version, and the capture status
 (mode, interface, errors, dropped packets, why capture stopped, saved files).
 
@@ -246,7 +276,7 @@ number of alerts:
 python -m pytest
 ```
 
-69 tests cover the parser, the store and its decay, the filters, every security check
+83 tests cover the parser, the store and its decay, the filters, program naming, every security check
 (including both sample captures: every check fires on the attack, none on normal
 traffic, and no password ever appears in an alert), file rotation, capture limits, the
 access code and lockout, the security headers and the API. One test fails if
@@ -283,6 +313,7 @@ pinned SHA-256 hashes.
 | Data decay, capture limits, rotating .pcap files | done |
 | Security checks: port scan, host sweep, SYN flood, ARP spoofing, cleartext | done |
 | Brute-force and cleartext-password detection | done |
+| Program behind each packet: APP column, top applications | done |
 | Dashboard access code, lockout and security headers | done |
 | Offline dashboard, Windows .exe and release zips | done |
 | Testing on live traffic | done |
