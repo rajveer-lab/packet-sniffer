@@ -75,6 +75,7 @@ def parse_packet(pkt, timestamp=None):
         "icmp_type": None,
         "arp_op": None,     # 1 = request ("who has"), 2 = reply ("is at")
         "arp_mac": None,    # MAC the ARP sender claims for its IP
+        "app": None,        # program on this computer, filled in during live capture
         "info": "",
     }
 
