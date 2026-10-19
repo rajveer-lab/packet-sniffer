@@ -122,7 +122,9 @@ function usePolling(filters) {
         if (!pausedRef.current || reload.current) await fetchPackets();
         if (!stopped) { setStats(s); setSecurity(a); setOffline(false); }
       } catch (err) {
-        if (!stopped) setOffline(true);
+        // The access code changed (sniffer.py restarted): show the unlock page.
+        if (err.status === 401) window.location.reload();
+        else if (!stopped) setOffline(true);
       } finally {
         busy = false;
       }
@@ -671,6 +673,9 @@ function App() {
           <TopHosts hosts={stats?.top_hosts} retention={retention} onPick={focusHost} />
         </div>
       </div>
+      <footer className="footer">
+        Packet Sniffer {stats?.version || ""} &middot; team Big Packet &middot; capture only on your own device and network
+      </footer>
     </div>
     </>
   );
