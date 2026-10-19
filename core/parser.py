@@ -42,6 +42,11 @@ def service_for(sport, dport):
     return None
 
 
+def tcp_payload(pkt):
+    """The bytes a TCP segment carries (empty for every other packet)."""
+    return bytes(pkt[TCP].payload) if TCP in pkt else b""
+
+
 def tcp_flag_names(flags):
     text = str(flags)
     return [name for letter, name in TCP_FLAG_NAMES if letter in text]
