@@ -46,11 +46,12 @@ def capture_problem():
 
 class PacketPipeline:
     def __init__(self, store, queue_size=10000, on_record=None, monitor=None, recorder=None,
-                 limit_packets=None, limit_seconds=None):
+                 limit_packets=None, limit_seconds=None, processes=None):
         self.store = store
         self.on_record = on_record  # optional callback, e.g. print each packet
         self.monitor = monitor      # optional SecurityMonitor, sees every record
         self.recorder = recorder    # optional RotatingPcapWriter, saves every packet
+        self.processes = processes  # optional ProcessMap, names the program behind each packet
         self.limit_packets = limit_packets
         self.limit_seconds = limit_seconds
         self.queue = queue.Queue(maxsize=queue_size)
@@ -70,6 +71,7 @@ class PacketPipeline:
             "stopped": None,    # why capture ended by itself, e.g. "packet limit reached"
             "limit_packets": limit_packets,
             "limit_seconds": limit_seconds,
+            "apps": processes is not None,
         }
 
     def status(self):
@@ -110,7 +112,10 @@ class PacketPipeline:
             except queue.Empty:
                 continue
             try:
-                record = self.store.add(parse_packet(pkt, timestamp))
+                record = parse_packet(pkt, timestamp)
+                if self.processes:
+                    record["app"] = self.processes.lookup(record)
+                record = self.store.add(record)
             except Exception:
                 self._count("parse_errors")
                 continue
