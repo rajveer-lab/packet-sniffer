@@ -122,3 +122,22 @@ def test_records_go_to_the_security_monitor_and_packets_to_disk(tmp_path):
     assert pipeline.status()["saving"]["written"] == 3
     (saved,) = recorder.files()
     assert len(rdpcap(saved)) == 3
+
+
+class FakeProcesses:
+    def lookup(self, record):
+        return "chrome.exe" if record["proto"] == "TCP" else None
+
+
+def test_live_packets_are_named_with_their_program(tmp_path):
+    pcap = tmp_path / "three.pcap"
+    write_pcap(pcap)
+    store = TrafficStore()
+    pipeline = PacketPipeline(store, processes=FakeProcesses())
+
+    pipeline.start_replay(str(pcap), speed=0)
+    assert wait_for(lambda: store.last_id == 3)
+    pipeline.stop()
+    assert [p["app"] for p in store.packets_after(0)] == [None, "chrome.exe", "chrome.exe"]
+    assert store.stats()["top_apps"][0]["app"] == "chrome.exe"
+    assert pipeline.status()["apps"] is True
