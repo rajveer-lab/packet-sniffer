@@ -66,3 +66,9 @@ def test_conditions_are_combined():
 def test_bad_values_raise_readable_errors(conditions, message):
     with pytest.raises(ValueError, match=message):
         build_filter(**conditions)
+
+
+def test_search_finds_the_program():
+    named = dict(HTTPS, app="chrome.exe")
+    assert build_filter(text="chrome")(named)
+    assert not build_filter(text="spotify")(named)
