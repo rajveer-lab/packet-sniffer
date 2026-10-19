@@ -69,7 +69,7 @@ def test_alerts_endpoint(client, monitor):
     assert data["enabled"] is True
     assert [a["rule"] for a in data["alerts"]] == ["port_scan"]
     assert data["counts"]["high"] == 1
-    assert len(data["rules"]) == 5
+    assert len(data["rules"]) == 7
 
 
 def test_alerts_endpoint_without_a_monitor(store):
@@ -90,6 +90,25 @@ def test_dashboard_page_is_served(client):
     assert response.status_code == 200
     assert b"Packet Sniffer Dashboard" in response.data
     response.close()
-    js = client.get("/static/app.jsx")
-    assert js.status_code == 200
-    js.close()
+    for script in ("/static/app.js", "/static/vendor/react.production.min.js",
+                   "/static/vendor/react-dom.production.min.js"):
+        js = client.get(script)
+        assert js.status_code == 200, script
+        js.close()
+
+
+def test_page_loads_scripts_only_from_this_server(client):
+    page = client.get("/")
+    html = page.get_data(as_text=True)
+    page.close()
+    assert "<script src=\"/static/app.js\">" in html
+    assert "https://" not in html and "text/babel" not in html
+
+
+def test_compiled_dashboard_is_up_to_date():
+    """static/app.js must be rebuilt (python tools/build.py dashboard) after editing app.jsx."""
+    import hashlib
+
+    source = hashlib.sha256(open("static/app.jsx", "rb").read().replace(b"\r\n", b"\n")).hexdigest()
+    with open("static/app.js", encoding="utf-8") as built:
+        assert f"sha256 {source}" in built.readline()
