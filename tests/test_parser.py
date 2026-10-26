@@ -85,3 +85,79 @@ def test_service_uses_the_well_known_port():
     assert service_for(80, 61000) == "HTTP"
     assert service_for(50000, 50001) is None
     assert service_for(None, None) is None
+
+
+def client_hello(server_name):
+    """A real TLS ClientHello, made by Python's own TLS library."""
+    import ssl
+
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = ssl.create_default_context().wrap_bio(incoming, outgoing, server_hostname=server_name)
+    try:
+        tls.do_handshake()
+    except ssl.SSLWantReadError:
+        pass
+    return outgoing.read()
+
+
+def test_https_site_name_from_the_tls_client_hello():
+    from core.parser import tls_sni
+
+    hello = client_hello("vtop.vit.ac.in")
+    assert tls_sni(hello) == "vtop.vit.ac.in"
+    assert tls_sni(hello[:30]) is None                  # not enough of the message yet
+    assert tls_sni(b"\x17\x03\x03\x00\x20" + b"\x00" * 40) is None   # encrypted application data
+    assert tls_sni(b"GET / HTTP/1.1\r\n" * 4) is None
+
+
+def test_tcp_numbers_and_payload_size():
+    pkt = ETH / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=50000, dport=443, seq=1000, ack=77, flags="PA") / Raw(b"x" * 25)
+    r = parse_packet(pkt)
+    assert (r["seq"], r["ack"], r["payload_len"]) == (1000, 77, 25)
+
+
+def test_http_request_and_response_lines():
+    request = ETH / IP(src="192.168.1.5", dst="203.0.113.10") / TCP(sport=50102, dport=80, flags="PA") / Raw(
+        b"POST /login HTTP/1.1\r\nHost: video.example.com\r\nContent-Length: 3\r\n\r\na=b")
+    assert parse_packet(request)["info"] == "HTTP POST video.example.com/login"
+    response = ETH / IP(src="203.0.113.10", dst="192.168.1.5") / TCP(sport=80, dport=50102, flags="PA") / Raw(
+        b"HTTP/1.1 302 Found\r\nLocation: /home\r\n\r\n")
+    assert parse_packet(response)["info"] == "HTTP 302 Found"
+
+
+def test_dhcp_messages_name_the_device_and_the_server():
+    from scapy.layers.dhcp import BOOTP, DHCP
+
+    request = ETH / IP(src="0.0.0.0", dst="255.255.255.255") / UDP(sport=68, dport=67) / BOOTP(
+        chaddr=bytes.fromhex("3c22fb123456")) / DHCP(options=[("message-type", "request"), ("hostname", b"Rajveer-Laptop"), "end"])
+    r = parse_packet(request)
+    assert r["info"] == "DHCP request (Rajveer-Laptop)"
+    assert (r["dhcp_hostname"], r["dhcp_client_mac"]) == ("Rajveer-Laptop", "3c:22:fb:12:34:56")
+    offer = ETH / IP(src="192.168.1.1", dst="255.255.255.255") / UDP(sport=67, dport=68) / BOOTP(
+        op=2, yiaddr="192.168.1.5", chaddr=bytes.fromhex("3c22fb123456")) / DHCP(
+        options=[("message-type", "offer"), ("server_id", "192.168.1.1"), "end"])
+    r = parse_packet(offer)
+    assert (r["dhcp_type"], r["dhcp_server"], r["dhcp_offer"]) == ("offer", "192.168.1.1", "192.168.1.5")
+
+
+def test_mld_behind_a_hop_by_hop_header_is_icmp_not_other():
+    from scapy.layers.inet6 import ICMPv6MLReport2, IPv6ExtHdrHopByHop, RouterAlert
+
+    pkt = ETH / IPv6(src="fe80::1", dst="ff02::16") / IPv6ExtHdrHopByHop(options=[RouterAlert()]) / ICMPv6MLReport2()
+    r = parse_packet(pkt)
+    assert r["proto"] == "ICMP"
+    assert "Multicast Listener Report" in r["info"]
+
+
+def test_dns_packets_remember_the_name_asked_for():
+    pkt = ETH / IP(src="192.168.1.5", dst="8.8.8.8") / UDP(sport=53011, dport=53) / DNS(rd=1, qd=DNSQR(qname="example.com"))
+    assert parse_packet(pkt)["dns_query"] == "example.com"
+
+
+def test_layer_spans_for_the_hex_view():
+    from core.parser import layer_spans
+
+    pkt = ETH / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=50000, dport=80, flags="PA") / Raw(b"hello")
+    spans = layer_spans(bytes(pkt))
+    assert [(s["name"], s["start"], s["end"]) for s in spans] == [
+        ("Ethernet", 0, 14), ("IP", 14, 34), ("TCP", 34, 54), ("Data", 54, 59)]
