@@ -1,4 +1,4 @@
-// Built by tools/build.py from static/app.jsx (sha256 2e6fb2b942a829248f04e2e09333bc437cae30a0d3a544ea979e9e9be1871ab1).
+// Built by tools/build.py from static/app.jsx (sha256 0233111ac4fdd0e2c93be7d6005e42d398fdca0e3b400351a897334f018af043).
 // Do not edit: change app.jsx, then run  python tools/build.py dashboard
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
@@ -30,8 +30,11 @@ function formatBytes(n) {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 function formatTime(epochSeconds) {
-  return new Date(epochSeconds * 1000).toLocaleTimeString("en-GB", {
-    hour12: false
+  return new Date(epochSeconds * 1000).toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true
   });
 }
 function formatDuration(seconds) {
