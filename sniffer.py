@@ -8,9 +8,15 @@ API with Flask:
                         filtered by &proto=TCP &host=192.168.1.5 &port=443 &q=text
     GET /api/stats      totals, protocol share, top hosts, bandwidth, capture status
     GET /api/alerts     security alerts with advice and fixes, and the checks that raise them
-    GET /api/export/packets.csv, /api/export/alerts.csv    downloads
+    GET /api/connections                conversations: state, round trip, retransmissions
+    GET /api/devices                    devices on the local network
+    GET /api/packets/<id>/bytes         one packet's bytes and where each header is, for the hex view
+    GET /api/history?hours=24           sessions, alerts and busiest servers from earlier runs
+    GET /api/interfaces                 interfaces that can be captured on
+    GET /api/export/packets.csv, /api/export/packets.pcap, /api/export/alerts.csv    downloads
+    GET /report                         a printable report of the capture
     POST /api/defense/apply, /api/defense/undo             one-click fixes (JSON only)
-    POST /api/capture/stop, /api/capture/start             stop or restart capture (JSON only)
+    POST /api/capture/stop, /api/capture/start             stop, restart or change capture (JSON only)
 
 The dashboard and API need the access code printed at startup (see core/access.py).
 
@@ -39,13 +45,18 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 from core import __version__
 from core.access import add_security_headers, new_token, protect
-from core.capture import PacketPipeline, interface_name
-from core.defense import Defender, advice, protected_addresses
+from core.capture import PacketPipeline, check_filter, interface_name, list_interfaces
+from core.defense import Defender, advice, default_gateway, protected_addresses
+from core.devices import DeviceTable, own_macs
+from core.flows import FlowTable
+from core.history import History, HistoryWriter, default_path
 from core.filters import build_filter
 from core.names import NameCache
 from core.processes import ProcessMap
-from core.recorder import RotatingPcapWriter
-from core.security import SecurityMonitor
+from core.parser import layer_spans
+from core.recorder import RotatingPcapWriter, pcap_bytes
+from core.report import render as render_report
+from core.security import SecurityMonitor, load_blocklist
 from core.store import TrafficStore
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -75,7 +86,8 @@ def local_time(epoch):
     return time.strftime("%Y-%m-%d %I:%M:%S %p", time.localtime(epoch))
 
 
-def create_app(store, pipeline=None, monitor=None, token=None, defender=None, names=None):
+def create_app(store, pipeline=None, monitor=None, token=None, defender=None, names=None,
+               flows=None, devices=None, history=None):
     """The Flask app; with a ``token``, the dashboard and API need that access code."""
     app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
     app.after_request(add_security_headers)
@@ -166,9 +178,81 @@ def create_app(store, pipeline=None, monitor=None, token=None, defender=None, na
             return jsonify(ok=False, message="Unknown action."), 404
         if action == "stop":
             pipeline.stop_from_dashboard()
+            return jsonify(ok=True, capture=pipeline.status())
+        body = request.get_json(silent=True) or {}
+        if "iface" in body or "filter" in body:          # start again with other settings
+            if pipeline.status()["mode"] != "live":
+                return jsonify(ok=False, message="Interfaces and filters apply to live capture only."), 409
+            iface, bpf = body.get("iface") or None, (body.get("filter") or "").strip() or None
+            if iface and iface not in {i["name"] for i in list_interfaces()}:
+                return jsonify(ok=False, message=f"No interface called {iface}."), 400
+            problem = check_filter(bpf, iface)
+            if problem:
+                return jsonify(ok=False, message=problem), 400
+            pipeline.restart(iface=iface, bpf_filter=bpf, change=True)
         elif not pipeline.restart():
             return jsonify(ok=False, message="Capture is already running.", capture=pipeline.status()), 409
         return jsonify(ok=True, capture=pipeline.status())
+
+    @app.get("/api/interfaces")
+    def interfaces():
+        status = pipeline.status() if pipeline else {}
+        return jsonify(interfaces=list_interfaces(), current=status.get("source"), filter=status.get("filter"),
+                       mode=status.get("mode"))
+
+    @app.get("/api/connections")
+    def connections():
+        if flows is None:
+            return jsonify(connections=[], summary={})
+        limit = max(1, min(request.args.get("limit", default=300, type=int), 2000))
+        return jsonify(connections=flows.connections(limit), summary=flows.summary())
+
+    @app.get("/api/devices")
+    def device_list():
+        return jsonify(devices=devices.devices() if devices is not None else [])
+
+    @app.get("/api/packets/<int:packet_id>/bytes")
+    def packet_bytes(packet_id):
+        found = store.get(packet_id)
+        if not found or not found[1]:
+            return jsonify(error="That packet has decayed, or its bytes were not kept."), 404
+        record, (raw, link) = found
+        try:
+            spans = layer_spans(raw, link)
+        except Exception:
+            spans = [{"name": "Data", "start": 0, "end": len(raw)}]
+        return jsonify(id=packet_id, length=len(raw), hex=raw.hex(), layers=spans)
+
+    @app.get("/api/export/packets.pcap")
+    def export_pcap():
+        try:
+            match = packet_filter()
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        data = pcap_bytes([(r["time"], raw, link) for r, (raw, link) in store.with_raw(match)])
+        return Response(data, mimetype="application/vnd.tcpdump.pcap",
+                        headers={"Content-Disposition": 'attachment; filename="packets.pcap"'})
+
+    @app.get("/api/history")
+    def history_view():
+        if history is None:
+            return jsonify(enabled=False)
+        hours = max(1, min(request.args.get("hours", default=24, type=int), 24 * 30))
+        return jsonify(dict(history.query(hours), enabled=True, error=history.error))
+
+    @app.get("/report")
+    def report():
+        alerts = monitor.summary(limit=10**9)["alerts"] if monitor else []
+        if defender:
+            alerts = [defender.describe(a) for a in alerts]
+        else:
+            alerts = [dict(a, advice=advice(a), fixed=None) for a in alerts]
+        html = render_report(
+            stats=store.stats(), capture=pipeline.status() if pipeline else None, alerts=alerts,
+            connections=flows.connections(2000) if flows is not None else [],
+            flow_summary=flows.summary() if flows is not None else {},
+            devices=devices.devices() if devices is not None else [], version=__version__)
+        return Response(html, mimetype="text/html")
 
     @app.get("/api/export/packets.csv")
     def export_packets():
@@ -243,6 +327,14 @@ def parse_args():
     saving.add_argument("--keep-files", type=int, default=5, metavar="N",
                         help="keep only the newest N files, deleting older ones (default 5)")
     parser.add_argument("--no-security", action="store_true", help="turn off the security checks")
+    parser.add_argument("--blocklist", metavar="FILE",
+                        help="extra domains to alert on, one per line (hosts-file lines work too)")
+    parser.add_argument("--upload-mb", type=float, default=50, metavar="MB",
+                        help="alert when this computer sends this much to one address within a minute (default 50)")
+    parser.add_argument("--history", metavar="FILE", default=default_path(),
+                        help="where to keep sessions, alerts and connections between runs "
+                             "(default: %%LOCALAPPDATA%%\\PacketSniffer\\history.db)")
+    parser.add_argument("--no-history", action="store_true", help="do not keep a history between runs")
     parser.add_argument("--auto-block", action="store_true",
                         help="block attackers found by the port-scan, host-sweep and brute-force checks "
                              "straight away (needs Administrator)")
@@ -269,8 +361,11 @@ def main():
         return
 
     store = TrafficStore(max_packets=args.max_packets, retention_seconds=args.retention)
-    monitor = None if args.no_security else SecurityMonitor()
+    blocklist = load_blocklist() + (load_blocklist(args.blocklist) if args.blocklist else [])
+    monitor = None if args.no_security else SecurityMonitor(blocklist=blocklist, upload_mb=args.upload_mb)
     names = NameCache()
+    flows = FlowTable()
+    devices = DeviceTable(own_macs=own_macs(), router_ip=default_gateway())
     defender = Defender(interface=interface_name(args.iface), protected=protected_addresses(),
                         auto_block=args.auto_block)
     if monitor:
@@ -289,6 +384,8 @@ def main():
         limit_seconds=args.duration,
         processes=processes,
         names=names,
+        flows=flows,
+        devices=devices,
     )
     if args.pcap:
         pipeline.start_replay(args.pcap, speed=args.speed, loop=args.loop)
@@ -315,6 +412,24 @@ def main():
         print("Programs: named from this computer's open connections"
               + (f" (WARNING: {processes.error})" if processes.error else ""))
 
+    history = writer = None
+    if not args.no_history:
+        try:
+            history = History(args.history)
+            history.start_session(pipeline.status()["mode"], str(pipeline.status()["source"]))
+
+            def collect():
+                totals = store.stats()
+                alerts = monitor.summary(limit=10**9)["alerts"] if monitor else []
+                return alerts, flows.connections(2000), totals["total_packets"], totals["total_bytes"]
+
+            writer = HistoryWriter(history, collect)
+            writer.start()
+            print(f"History: {history.path} (kept {history.keep_days} days)")
+        except Exception as exc:
+            history = None
+            print(f"History: off ({exc})")
+
     token = None if args.no_auth else (args.token or new_token())
     local = args.host in ("127.0.0.1", "localhost", "::1")
     host = "localhost" if local else args.host
@@ -332,10 +447,13 @@ def main():
     # Flask logs every request, and the dashboard polls twice a second.
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     try:
-        app = create_app(store, pipeline, monitor, token, defender=defender, names=names)
+        app = create_app(store, pipeline, monitor, token, defender=defender, names=names,
+                         flows=flows, devices=devices, history=history)
         app.run(host=args.host, port=args.port, threaded=True)
     finally:
         pipeline.stop()   # closes the current .pcap file cleanly
+        if writer:
+            writer.stop()  # saves the history one last time
 
 
 if __name__ == "__main__":
