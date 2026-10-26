@@ -72,7 +72,7 @@ def csv_download(filename, header, rows):
 
 
 def local_time(epoch):
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+    return time.strftime("%Y-%m-%d %I:%M:%S %p", time.localtime(epoch))
 
 
 def create_app(store, pipeline=None, monitor=None, token=None, defender=None, names=None):
@@ -205,8 +205,8 @@ def create_app(store, pipeline=None, monitor=None, token=None, defender=None, na
 
 def print_record(record):
     """One terminal line per packet, e.g.
-    10:42:07  TCP   192.168.1.5 -> 203.0.113.10:443    66 B  HTTPS [SYN]"""
-    clock = time.strftime("%H:%M:%S", time.localtime(record["time"]))
+    10:42:07 AM  TCP   192.168.1.5 -> 203.0.113.10:443    66 B  HTTPS [SYN]"""
+    clock = time.strftime("%I:%M:%S %p", time.localtime(record["time"]))
     dst = record["dst"] or "?"
     if record["dport"] is not None:
         dst = f"{dst}:{record['dport']}"
