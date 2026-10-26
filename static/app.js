@@ -1,4 +1,4 @@
-// Built by tools/build.py from static/app.jsx (sha256 0233111ac4fdd0e2c93be7d6005e42d398fdca0e3b400351a897334f018af043).
+// Built by tools/build.py from static/app.jsx (sha256 0ae36df4f90a61b4e3477875bbb2202271d20eca83c0e562b17933c99a84c801).
 // Do not edit: change app.jsx, then run  python tools/build.py dashboard
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
@@ -294,40 +294,73 @@ function bandwidthScale(maxBytes) {
     }))
   };
 }
+function spreadLabels(items, minGap, top, bottom) {
+  const sorted = [...items].sort((a, b) => a.y - b.y);
+  for (let i = 1; i < sorted.length; i++) sorted[i].y = Math.max(sorted[i].y, sorted[i - 1].y + minGap);
+  const overflow = sorted.length ? sorted[sorted.length - 1].y - bottom : 0;
+  if (overflow > 0) sorted.forEach(s => {
+    s.y = Math.max(top, s.y - overflow);
+  });
+  return sorted;
+}
 function BandwidthChart({
-  points
+  points,
+  apps,
+  appsEnabled
 }) {
   const [ref, width] = useWidth();
   const [hover, setHover] = useState(null);
-  const data = (points || []).slice(0, -1);
+  const [mode, setMode] = useState("total");
+  const byProgram = mode === "programs";
+  const totals = (points || []).slice(0, -1);
+  const appPoints = (apps?.points || []).slice(0, -1);
+  const series = byProgram ? (apps?.apps || []).map((app, i) => ({
+    key: app,
+    label: app,
+    cls: `s${i + 1}`,
+    values: appPoints.map(p => p.bytes[app] || 0)
+  })) : [{
+    key: "total",
+    label: "All traffic",
+    cls: "s-total",
+    values: totals.map(d => d.bytes)
+  }];
+  const times = byProgram ? appPoints.map(p => p.t) : totals.map(d => d.t);
+  const n = times.length;
   const H = 180;
   const M = {
     top: 12,
-    right: 14,
+    right: byProgram ? 132 : 14,
     bottom: 26,
     left: 70
   };
   const innerW = Math.max(0, width - M.left - M.right);
   const innerH = H - M.top - M.bottom;
-  const scale = bandwidthScale(Math.max(0, ...data.map(d => d.bytes)));
-  const x = i => M.left + (data.length > 1 ? i / (data.length - 1) * innerW : 0);
+  const peak = Math.max(0, ...series.flatMap(s => s.values));
+  const scale = bandwidthScale(peak);
+  const x = i => M.left + (n > 1 ? i / (n - 1) * innerW : 0);
   const y = v => M.top + innerH - v / scale.top * innerH;
-  const line = data.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d.bytes).toFixed(1)}`).join("");
-  const area = data.length > 1 ? `${line}L${x(data.length - 1)},${y(0)}L${x(0)},${y(0)}Z` : "";
-  const peak = data.reduce((best, d) => d.bytes > best ? d.bytes : best, 0);
-  const marks = [0, 15, 30, 45].map(ago => data.length - 1 - ago).filter(i => i >= 0);
-  const h = hover != null && data[hover] ? hover : null;
+  const path = values => values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const marks = [0, 15, 30, 45].map(ago => n - 1 - ago).filter(i => i >= 0);
+  const h = hover != null && hover < n ? hover : null;
+  const labels = byProgram && n ? spreadLabels(series.map(s => ({
+    key: s.key,
+    label: s.label,
+    cls: s.cls,
+    y: y(s.values[n - 1])
+  })), 13, M.top, M.top + innerH) : [];
   function onPointer(e) {
-    if (!data.length || !innerW) return;
+    if (!n || !innerW) return;
     const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
-    const i = Math.round((px - M.left) / innerW * (data.length - 1));
-    setHover(Math.max(0, Math.min(data.length - 1, i)));
+    const i = Math.round((px - M.left) / innerW * (n - 1));
+    setHover(Math.max(0, Math.min(n - 1, i)));
   }
   function onKey(e) {
-    if (!data.length) return;
-    if (e.key === "ArrowLeft") setHover(i => Math.max(0, (i ?? data.length) - 1));else if (e.key === "ArrowRight") setHover(i => Math.min(data.length - 1, (i ?? -1) + 1));else if (e.key === "Escape") setHover(null);else return;
+    if (!n) return;
+    if (e.key === "ArrowLeft") setHover(i => Math.max(0, (i ?? n) - 1));else if (e.key === "ArrowRight") setHover(i => Math.min(n - 1, (i ?? -1) + 1));else if (e.key === "Escape") setHover(null);else return;
     e.preventDefault();
   }
+  const empty = byProgram ? appsEnabled === false ? "Programs are named during live capture only" : "No program traffic in the last minute" : "No traffic in the last minute";
   return React.createElement("div", {
     className: "card chart-card"
   }, React.createElement("div", {
@@ -336,16 +369,30 @@ function BandwidthChart({
     className: "label"
   }, "Bandwidth"), React.createElement("div", {
     className: "muted"
-  }, "Bytes per second over the last minute")), React.createElement("div", {
+  }, "Bytes per second over the last minute", byProgram ? ", busiest programs" : "")), React.createElement("div", {
+    className: "chart-head-right"
+  }, React.createElement("span", {
     className: "muted"
-  }, "peak ", formatBytes(peak), "/s")), React.createElement("div", {
+  }, "peak ", formatBytes(peak), "/s"), React.createElement("div", {
+    className: "seg small",
+    role: "group",
+    "aria-label": "What to show"
+  }, [["total", "Total"], ["programs", "By program"]].map(([key, text]) => React.createElement("button", {
+    key: key,
+    className: mode === key ? "on" : "",
+    "aria-pressed": mode === key,
+    onClick: () => {
+      setMode(key);
+      setHover(null);
+    }
+  }, text))))), React.createElement("div", {
     className: "chart",
     ref: ref,
     tabIndex: 0,
     "aria-label": "Bandwidth over the last minute. Use the arrow keys to read each second.",
     onPointerMove: onPointer,
     onPointerLeave: () => setHover(null),
-    onFocus: () => setHover(i => i ?? data.length - 1),
+    onFocus: () => setHover(i => i ?? n - 1),
     onBlur: () => setHover(null),
     onKeyDown: onKey
   }, width > 0 && React.createElement("svg", {
@@ -371,37 +418,62 @@ function BandwidthChart({
     className: "axis",
     x: x(i),
     y: H - 6,
-    textAnchor: i === data.length - 1 ? "end" : "middle"
-  }, i === data.length - 1 ? "now" : `${data.length - 1 - i} s ago`)), React.createElement("path", {
+    textAnchor: i === n - 1 ? "end" : "middle"
+  }, i === n - 1 ? "now" : `${n - 1 - i} s ago`)), !byProgram && n > 1 && React.createElement("path", {
     className: "area",
-    d: area
-  }), React.createElement("path", {
-    className: "line",
-    d: line
-  }), h != null && React.createElement("g", null, React.createElement("line", {
+    d: `${path(series[0].values)}L${x(n - 1)},${y(0)}L${x(0)},${y(0)}Z`
+  }), series.map(s => React.createElement("path", {
+    key: s.key,
+    className: `line ${s.cls}`,
+    d: path(s.values)
+  })), labels.map(l => React.createElement("text", {
+    key: l.key,
+    className: "end-label",
+    x: x(n - 1) + 10,
+    y: l.y,
+    dy: "0.32em"
+  }, l.label.length > 16 ? `${l.label.slice(0, 15)}…` : l.label)), h != null && React.createElement("g", null, React.createElement("line", {
     className: "crosshair",
     x1: x(h),
     x2: x(h),
     y1: M.top,
     y2: M.top + innerH
-  }), React.createElement("circle", {
-    className: "dot",
+  }), series.map(s => React.createElement("circle", {
+    key: s.key,
+    className: `dot ${s.cls}`,
     cx: x(h),
-    cy: y(data[h].bytes),
+    cy: y(s.values[h]),
     r: "4.5"
-  }))), width > 0 && peak === 0 && React.createElement("div", {
+  })))), width > 0 && peak === 0 && React.createElement("div", {
     className: "chart-empty"
-  }, "No traffic in the last minute"), h != null && React.createElement("div", {
+  }, empty), h != null && React.createElement("div", {
     className: "tooltip",
     style: {
-      left: Math.min(Math.max(x(h), 90), width - 90),
-      top: Math.max(y(data[h].bytes) - 64, 0)
+      left: Math.min(Math.max(x(h), 110), width - 110),
+      top: 0
     }
-  }, React.createElement("b", null, formatBytes(data[h].bytes), "/s"), React.createElement("span", null, data[h].packets.toLocaleString(), " packets \xB7 ", formatTime(data[h].t))), React.createElement("div", {
+  }, series.map(s => React.createElement("span", {
+    key: s.key,
+    className: "tip-row"
+  }, React.createElement("i", {
+    className: `key ${s.cls}`,
+    "aria-hidden": "true"
+  }), React.createElement("b", null, formatBytes(s.values[h]), "/s"), byProgram && React.createElement("em", null, s.label))), React.createElement("span", null, !byProgram && `${totals[h]?.packets.toLocaleString()} packets · `, formatTime(times[h]))), React.createElement("div", {
     className: "sr-only"
-  }, React.createElement("table", null, React.createElement("caption", null, "Bytes and packets per second, last minute"), React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Time"), React.createElement("th", null, "Bytes"), React.createElement("th", null, "Packets"))), React.createElement("tbody", null, data.map(d => React.createElement("tr", {
-    key: d.t
-  }, React.createElement("td", null, formatTime(d.t)), React.createElement("td", null, d.bytes), React.createElement("td", null, d.packets))))))));
+  }, React.createElement("table", null, React.createElement("caption", null, "Bytes per second, last minute"), React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Time"), series.map(s => React.createElement("th", {
+    key: s.key
+  }, s.label)))), React.createElement("tbody", null, times.map((t, i) => React.createElement("tr", {
+    key: t
+  }, React.createElement("td", null, formatTime(t)), series.map(s => React.createElement("td", {
+    key: s.key
+  }, s.values[i])))))))), byProgram && series.length > 0 && React.createElement("div", {
+    className: "chart-legend"
+  }, series.map(s => React.createElement("span", {
+    key: s.key
+  }, React.createElement("i", {
+    className: `key ${s.cls}`,
+    "aria-hidden": "true"
+  }), s.label))));
 }
 function FilterBar({
   filters,
@@ -538,7 +610,12 @@ function PacketTable({
     href: `/api/export/packets.csv?${filterQuery(filters)}`,
     download: true,
     title: "Download the packets shown (with the current filters) as a spreadsheet"
-  }, "Export CSV"), React.createElement("button", {
+  }, "Export CSV"), React.createElement("a", {
+    className: "button",
+    href: `/api/export/packets.pcap?${filterQuery(filters)}`,
+    download: true,
+    title: "Download the packets shown as a .pcap file, to open in Wireshark"
+  }, "Export .pcap"), React.createElement("button", {
     className: paused ? "paused" : "",
     onClick: () => setPaused(!paused)
   }, paused ? "Resume" : "Pause"))), React.createElement(FilterBar, {
@@ -568,7 +645,7 @@ function PacketTable({
     className: "num"
   }, "BYTES"), React.createElement("th", null, "INFO"))), React.createElement("tbody", null, rows.map(p => React.createElement("tr", {
     key: p.id,
-    className: p.id === selectedId ? "selected" : "",
+    className: [p.id === selectedId ? "selected" : "", p.tcp_note ? "noted" : ""].join(" ").trim(),
     onClick: () => onSelect(p)
   }, React.createElement("td", {
     className: "time"
@@ -913,9 +990,106 @@ function TopHosts({
     className: "muted"
   }, "No hosts yet.")));
 }
+function readSetting(key, fallback) {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : JSON.parse(value);
+  } catch (err) {
+    return fallback;
+  }
+}
+function useSetting(key, fallback) {
+  const [value, setValue] = useState(() => readSetting(key, fallback));
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch (err) {}
+  }, [key, value]);
+  return [value, setValue];
+}
+function useFetch(url, everyMs) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let stopped = false;
+    async function load() {
+      try {
+        const body = await getJSON(url);
+        if (!stopped) {
+          setData(body);
+          setError(null);
+        }
+      } catch (err) {
+        if (err.status === 401) window.location.reload();else if (!stopped) setError(err.message);
+      }
+    }
+    load();
+    const timer = everyMs ? setInterval(load, everyMs) : null;
+    return () => {
+      stopped = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [url, everyMs]);
+  return {
+    data,
+    error
+  };
+}
+const APP_LAYER = /^(DNS|DHCP|HTTP|TLS)\b/;
+function HexView({
+  packetId
+}) {
+  const {
+    data,
+    error
+  } = useFetch(`/api/packets/${packetId}/bytes`, 0);
+  if (error) return React.createElement("div", {
+    className: "muted"
+  }, error);
+  if (!data) return React.createElement("div", {
+    className: "muted"
+  }, "Loading bytes\u2026");
+  const bytes = data.hex.match(/../g) || [];
+  const layerOf = i => data.layers.findIndex(l => i >= l.start && i < l.end);
+  const rows = [];
+  for (let offset = 0; offset < bytes.length; offset += 16) rows.push(offset);
+  return React.createElement("div", {
+    className: "hexview"
+  }, React.createElement("div", {
+    className: "hex-legend"
+  }, data.layers.map((l, i) => React.createElement("span", {
+    key: i,
+    className: `hx l${i % 6}`
+  }, l.name, " ", React.createElement("small", null, l.end - l.start, " B")))), React.createElement("div", {
+    className: "hex-rows",
+    role: "table",
+    "aria-label": "Packet bytes"
+  }, rows.map(offset => React.createElement("div", {
+    className: "hex-row",
+    role: "row",
+    key: offset
+  }, React.createElement("span", {
+    className: "off"
+  }, offset.toString(16).padStart(4, "0")), React.createElement("span", {
+    className: "bytes"
+  }, bytes.slice(offset, offset + 16).map((b, j) => React.createElement("span", {
+    key: j,
+    className: `hx l${layerOf(offset + j) % 6}`
+  }, b))), React.createElement("span", {
+    className: "ascii"
+  }, bytes.slice(offset, offset + 16).map((b, j) => {
+    const code = parseInt(b, 16);
+    return React.createElement("span", {
+      key: j,
+      className: `hx l${layerOf(offset + j) % 6}`
+    }, code > 31 && code < 127 ? String.fromCharCode(code) : ".");
+  }))))));
+}
 function PacketDetails({
   packet
 }) {
+  const [showBytes, setShowBytes] = useState(false);
+  useEffect(() => setShowBytes(false), [packet?.id]);
   return React.createElement("div", {
     className: "card"
   }, React.createElement("div", {
@@ -923,8 +1097,13 @@ function PacketDetails({
   }, React.createElement("div", {
     className: "label"
   }, "Packet details"), packet && React.createElement("div", {
+    className: "head-buttons"
+  }, React.createElement("span", {
     className: "muted"
-  }, "#", packet.id)), !packet && React.createElement("div", {
+  }, "#", packet.id), React.createElement("button", {
+    onClick: () => setShowBytes(s => !s),
+    "aria-expanded": showBytes
+  }, showBytes ? "Hide bytes" : "Show bytes"))), !packet && React.createElement("div", {
     className: "muted"
   }, "Click a packet to see its headers decoded layer by layer."), packet && React.createElement("div", null, packet.app && React.createElement("div", {
     className: "layer l-app"
@@ -932,7 +1111,13 @@ function PacketDetails({
     className: "name"
   }, "PROGRAM"), React.createElement("div", {
     className: "body"
-  }, packet.app, React.createElement("br", null), React.createElement("span", null, "sent or received by this program on this computer"))), packet.src_mac && React.createElement("div", {
+  }, packet.app, React.createElement("br", null), React.createElement("span", null, "sent or received by this program on this computer"))), APP_LAYER.test(packet.info) && React.createElement("div", {
+    className: "layer l-application"
+  }, React.createElement("div", {
+    className: "name"
+  }, packet.info.split(" ")[0]), React.createElement("div", {
+    className: "body"
+  }, packet.info.split(" ").slice(1).join(" "))), packet.src_mac && React.createElement("div", {
     className: "layer l-link"
   }, React.createElement("div", {
     className: "name"
@@ -950,19 +1135,448 @@ function PacketDetails({
     className: "name"
   }, "IPv", packet.ip_version), React.createElement("div", {
     className: "body"
-  }, React.createElement("span", null, "src"), " ", packet.src, React.createElement("br", null), React.createElement("span", null, "dst"), " ", packet.dst, React.createElement("br", null), React.createElement("span", null, packet.ip_version === 6 ? "hop limit" : "ttl"), " ", packet.ttl)), ["TCP", "UDP", "ICMP"].includes(packet.proto) && React.createElement("div", {
+  }, React.createElement("span", null, "src"), " ", packet.src, packet.src_name ? ` (${packet.src_name})` : "", React.createElement("br", null), React.createElement("span", null, "dst"), " ", packet.dst, packet.dst_name ? ` (${packet.dst_name})` : "", React.createElement("br", null), React.createElement("span", null, packet.ip_version === 6 ? "hop limit" : "ttl"), " ", packet.ttl)), ["TCP", "UDP", "ICMP"].includes(packet.proto) && React.createElement("div", {
     className: "layer l-trans"
   }, React.createElement("div", {
     className: "name"
   }, packet.proto), React.createElement("div", {
     className: "body"
-  }, packet.sport != null && React.createElement(React.Fragment, null, React.createElement("span", null, "ports"), " ", packet.sport, " \u2192 ", packet.dport, React.createElement("br", null)), packet.flags.length > 0 && React.createElement(React.Fragment, null, React.createElement("span", null, "flags"), " ", packet.flags.join(", "), React.createElement("br", null)), packet.service && React.createElement(React.Fragment, null, React.createElement("span", null, "service"), " ", packet.service, React.createElement("br", null)), packet.proto === "ICMP" && React.createElement(React.Fragment, null, React.createElement("span", null, "type"), " ", packet.info))), React.createElement("div", {
+  }, packet.sport != null && React.createElement(React.Fragment, null, React.createElement("span", null, "ports"), " ", packet.sport, " \u2192 ", packet.dport, React.createElement("br", null)), packet.flags.length > 0 && React.createElement(React.Fragment, null, React.createElement("span", null, "flags"), " ", packet.flags.join(", "), React.createElement("br", null)), packet.seq != null && React.createElement(React.Fragment, null, React.createElement("span", null, "seq"), " ", packet.seq, " ", React.createElement("span", null, "ack"), " ", packet.ack, React.createElement("br", null)), packet.payload_len > 0 && React.createElement(React.Fragment, null, React.createElement("span", null, "data"), " ", packet.payload_len, " bytes", React.createElement("br", null)), packet.tcp_note && React.createElement(React.Fragment, null, React.createElement("span", null, "note"), " ", React.createElement("b", {
+    className: "note"
+  }, packet.tcp_note), React.createElement("br", null)), packet.service && React.createElement(React.Fragment, null, React.createElement("span", null, "service"), " ", packet.service, React.createElement("br", null)), packet.proto === "ICMP" && React.createElement(React.Fragment, null, React.createElement("span", null, "type"), " ", packet.info))), React.createElement("div", {
     className: "layer l-data"
   }, React.createElement("div", {
     className: "name"
   }, "FRAME"), React.createElement("div", {
     className: "body"
-  }, React.createElement("span", null, "size"), " ", packet.length, " bytes", React.createElement("br", null), React.createElement("span", null, "time"), " ", formatTime(packet.time)))));
+  }, React.createElement("span", null, "size"), " ", packet.length, " bytes", React.createElement("br", null), React.createElement("span", null, "time"), " ", formatTime(packet.time))), showBytes && React.createElement(HexView, {
+    packetId: packet.id
+  })));
+}
+function ViewTabs({
+  view,
+  setView
+}) {
+  const views = [["packets", "Packets"], ["connections", "Connections"], ["devices", "Devices"], ["history", "History"]];
+  return React.createElement("div", {
+    className: "view-tabs",
+    role: "tablist",
+    "aria-label": "Views"
+  }, views.map(([key, text]) => React.createElement("button", {
+    key: key,
+    role: "tab",
+    "aria-selected": view === key,
+    className: view === key ? "on" : "",
+    onClick: () => setView(key)
+  }, text)));
+}
+function Tiles({
+  items
+}) {
+  return React.createElement("div", {
+    className: "summary"
+  }, items.map(item => React.createElement("div", {
+    className: "metric",
+    key: item.label
+  }, React.createElement("div", {
+    className: "label"
+  }, item.label), React.createElement("div", {
+    className: "value"
+  }, item.value), React.createElement("div", {
+    className: "sub"
+  }, item.sub))));
+}
+const STATE_CLASS = {
+  established: "good",
+  "SYN sent": "wait",
+  "SYN received": "wait",
+  closing: "wait",
+  closed: "done",
+  reset: "bad",
+  active: "good",
+  "joined late": "done"
+};
+function ConnectionsView({
+  onFocus
+}) {
+  const {
+    data
+  } = useFetch("/api/connections?limit=500", 2000);
+  const [query, setQuery] = useState("");
+  const all = data?.connections || [];
+  const q = query.trim().toLowerCase();
+  const rows = q ? all.filter(c => [c.client, c.server, c.server_name, c.app, c.state, c.proto, c.service].some(v => v && String(v).toLowerCase().includes(q))) : all;
+  const s = data?.summary || {};
+  return React.createElement(React.Fragment, null, React.createElement(Tiles, {
+    items: [{
+      label: "Connections",
+      value: (s.connections ?? 0).toLocaleString(),
+      sub: `${s.tcp ?? 0} TCP · ${s.udp ?? 0} UDP`
+    }, {
+      label: "Average round trip",
+      value: s.avg_rtt_ms != null ? `${s.avg_rtt_ms} ms` : "-",
+      sub: "SYN to SYN-ACK"
+    }, {
+      label: "Retransmissions",
+      value: `${s.retransmission_percent ?? 0}%`,
+      sub: "of TCP packets sent again"
+    }, {
+      label: "Duplicate ACKs",
+      value: (s.dup_acks ?? 0).toLocaleString(),
+      sub: "receivers asking for lost data"
+    }]
+  }), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-head"
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "label"
+  }, "Connections"), React.createElement("div", {
+    className: "muted"
+  }, "Newest activity first \xB7 click one to see its packets")), React.createElement("input", {
+    className: "search",
+    placeholder: "Search connections",
+    value: query,
+    onChange: e => setQuery(e.target.value),
+    "aria-label": "Search connections"
+  })), React.createElement("div", {
+    className: "table-wrap tall"
+  }, React.createElement("table", null, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "LAST SEEN"), React.createElement("th", null, "APP"), React.createElement("th", null, "CLIENT"), React.createElement("th", null, "SERVER"), React.createElement("th", null, "PROTO"), React.createElement("th", null, "STATE"), React.createElement("th", {
+    className: "num"
+  }, "ROUND TRIP"), React.createElement("th", {
+    className: "num"
+  }, "SENT"), React.createElement("th", {
+    className: "num"
+  }, "RECEIVED"), React.createElement("th", {
+    className: "num"
+  }, "RETRANS."), React.createElement("th", {
+    className: "num"
+  }, "DURATION"))), React.createElement("tbody", null, rows.map(c => React.createElement("tr", {
+    key: c.id,
+    onClick: () => onFocus(c.server),
+    title: "Show this connection's packets"
+  }, React.createElement("td", {
+    className: "time"
+  }, formatTime(c.last_seen)), React.createElement("td", {
+    className: "program"
+  }, c.app || React.createElement("span", {
+    className: "none"
+  }, "\u2014")), React.createElement("td", null, withPort(c.client, c.client_port)), React.createElement("td", null, withPort(c.server, c.server_port), c.server_name && React.createElement("span", {
+    className: "hostname"
+  }, c.server_name)), React.createElement("td", null, React.createElement("span", {
+    className: `badge p-${protoClass(c.proto)}`
+  }, c.proto)), React.createElement("td", null, React.createElement("span", {
+    className: `state ${STATE_CLASS[c.state] || ""}`
+  }, c.state)), React.createElement("td", {
+    className: "num"
+  }, c.rtt_ms != null ? `${c.rtt_ms} ms` : "-"), React.createElement("td", {
+    className: "num"
+  }, formatBytes(c.bytes_out)), React.createElement("td", {
+    className: "num"
+  }, formatBytes(c.bytes_in)), React.createElement("td", {
+    className: "num"
+  }, c.retransmissions || ""), React.createElement("td", {
+    className: "num"
+  }, formatDuration(c.duration)))))), !rows.length && React.createElement("div", {
+    className: "empty"
+  }, q ? "No connections match." : "No connections yet."))));
+}
+function DevicesView({
+  onFocus
+}) {
+  const {
+    data
+  } = useFetch("/api/devices", 3000);
+  const devices = data?.devices || [];
+  return React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-head"
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "label"
+  }, "Devices on this network"), React.createElement("div", {
+    className: "muted"
+  }, "Seen in their own traffic \xB7 maker from the MAC address \xB7 name from DHCP")), React.createElement("span", {
+    className: "muted"
+  }, devices.length, " found")), React.createElement("div", {
+    className: "devices"
+  }, devices.map(d => React.createElement("button", {
+    className: "device",
+    key: d.mac,
+    onClick: () => onFocus(d.mac),
+    title: "Show this device's packets"
+  }, React.createElement("span", {
+    className: "device-name"
+  }, d.name || d.maker || "Unknown device", d.is_this_computer && React.createElement("span", {
+    className: "tag"
+  }, "THIS COMPUTER"), d.is_router && React.createElement("span", {
+    className: "tag"
+  }, "ROUTER")), React.createElement("span", {
+    className: "muted"
+  }, d.name ? d.maker || "unknown maker" : ""), React.createElement("span", {
+    className: "mono"
+  }, d.addresses.join(", ") || "no address seen"), React.createElement("span", {
+    className: "mono muted"
+  }, d.mac), React.createElement("span", {
+    className: "muted"
+  }, d.packets.toLocaleString(), " packets \xB7 ", formatBytes(d.bytes), " \xB7 last ", formatTime(d.last_seen)))), !devices.length && React.createElement("div", {
+    className: "muted"
+  }, "No devices seen yet.")));
+}
+function HistoryView() {
+  const [hours, setHours] = useState(24);
+  const {
+    data,
+    error
+  } = useFetch(`/api/history?hours=${hours}`, 10000);
+  if (data && !data.enabled) {
+    return React.createElement("div", {
+      className: "card"
+    }, React.createElement("div", {
+      className: "muted"
+    }, "History is off. Start without --no-history to keep it."));
+  }
+  const maxServer = Math.max(1, ...(data?.top_servers || []).map(s => s.bytes_in + s.bytes_out));
+  return React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-head"
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "label"
+  }, "History"), React.createElement("div", {
+    className: "muted"
+  }, "Kept between runs for ", data?.keep_days ?? 7, " days", data?.path ? ` in ${data.path}` : "", error ? ` · ${error}` : "", data?.error ? ` · ${data.error}` : "")), React.createElement("div", {
+    className: "seg small",
+    role: "group",
+    "aria-label": "Time range"
+  }, [[1, "1 hour"], [6, "6 hours"], [24, "24 hours"], [168, "7 days"]].map(([h, text]) => React.createElement("button", {
+    key: h,
+    className: hours === h ? "on" : "",
+    "aria-pressed": hours === h,
+    onClick: () => setHours(h)
+  }, text)))), React.createElement("div", {
+    className: "history-grid"
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "label sub-label"
+  }, "Sessions"), (data?.sessions || []).map(s => React.createElement("div", {
+    className: "history-row",
+    key: s.id
+  }, React.createElement("span", null, s.mode === "replay" ? "Replay" : "Live", " \xB7 ", String(s.source).split(/[\\/]/).pop()), React.createElement("span", {
+    className: "muted"
+  }, formatTime(s.started), " \u2013 ", formatTime(s.ended), " \xB7 ", (s.packets || 0).toLocaleString(), " packets \xB7 ", formatBytes(s.bytes)))), !data?.sessions?.length && React.createElement("div", {
+    className: "muted"
+  }, "No sessions in this time.")), React.createElement("div", null, React.createElement("div", {
+    className: "label sub-label"
+  }, "Busiest servers"), (data?.top_servers || []).map(s => React.createElement("div", {
+    className: "host",
+    key: s.server
+  }, React.createElement("span", {
+    className: "name"
+  }, s.server, s.name && React.createElement("small", null, s.name)), React.createElement("span", {
+    className: "bar"
+  }, React.createElement("div", {
+    style: {
+      width: `${100 * (s.bytes_in + s.bytes_out) / maxServer}%`
+    }
+  })), React.createElement("span", {
+    className: "size"
+  }, formatBytes(s.bytes_in + s.bytes_out)))), !data?.top_servers?.length && React.createElement("div", {
+    className: "muted"
+  }, "No connections in this time.")))), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-head"
+  }, React.createElement("div", {
+    className: "label"
+  }, "Alerts in this time")), React.createElement("div", {
+    className: "table-wrap"
+  }, React.createElement("table", null, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "LAST SEEN"), React.createElement("th", null, "SEVERITY"), React.createElement("th", null, "ALERT"), React.createElement("th", {
+    className: "num"
+  }, "TIMES"))), React.createElement("tbody", null, (data?.alerts || []).map((a, i) => React.createElement("tr", {
+    key: `${a.session}-${i}`
+  }, React.createElement("td", {
+    className: "time"
+  }, formatTime(a.last_seen)), React.createElement("td", null, React.createElement("span", {
+    className: `sev s-${a.severity}`
+  }, SEVERITY_LABEL[a.severity])), React.createElement("td", {
+    className: "wrap"
+  }, React.createElement("b", null, a.title), React.createElement("span", {
+    className: "hostname"
+  }, a.detail)), React.createElement("td", {
+    className: "num"
+  }, a.count.toLocaleString()))))), !data?.alerts?.length && React.createElement("div", {
+    className: "empty"
+  }, "No alerts in this time."))));
+}
+function SettingsPanel({
+  onClose,
+  refresh
+}) {
+  const {
+    data
+  } = useFetch("/api/interfaces", 0);
+  const [iface, setIface] = useState(null);
+  const [filter, setFilter] = useState(null);
+  const [message, setMessage] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const chosen = iface ?? data?.current ?? "";
+  const bpf = filter ?? data?.filter ?? "";
+  const live = data?.mode === "live";
+  async function apply() {
+    setBusy(true);
+    const result = await postJSON("/api/capture/start", {
+      iface: chosen,
+      filter: bpf
+    });
+    setBusy(false);
+    setMessage({
+      ok: result.ok,
+      text: result.ok ? "Capture restarted with these settings." : result.message
+    });
+    if (result.ok) refresh();
+  }
+  return React.createElement("div", {
+    className: "popover",
+    role: "dialog",
+    "aria-label": "Capture settings"
+  }, React.createElement("div", {
+    className: "card-head"
+  }, React.createElement("div", {
+    className: "label"
+  }, "Capture settings"), React.createElement("button", {
+    className: "link",
+    onClick: onClose
+  }, "Close")), !live && data && React.createElement("p", {
+    className: "muted"
+  }, "Replaying a file: interface and filter apply to live capture only."), React.createElement("label", {
+    className: "field-label",
+    htmlFor: "iface"
+  }, "Interface"), React.createElement("select", {
+    id: "iface",
+    value: chosen,
+    disabled: !live,
+    onChange: e => setIface(e.target.value)
+  }, (data?.interfaces || []).map(i => React.createElement("option", {
+    key: i.name,
+    value: i.name
+  }, i.name, i.ips.length ? ` (${i.ips[0]})` : "", i.default ? " · default" : ""))), React.createElement("label", {
+    className: "field-label",
+    htmlFor: "bpf"
+  }, "Capture filter (BPF)"), React.createElement("input", {
+    id: "bpf",
+    className: "mono-input",
+    value: bpf,
+    disabled: !live,
+    placeholder: "e.g. tcp port 443, or host 192.168.1.5",
+    onChange: e => setFilter(e.target.value)
+  }), React.createElement("p", {
+    className: "muted"
+  }, "Only matching packets are captured at all. Leave empty to capture everything."), message && React.createElement("div", {
+    className: `fix-message ${message.ok ? "good" : "bad"}`
+  }, message.text), React.createElement("button", {
+    className: "primary",
+    disabled: !live || busy,
+    onClick: apply
+  }, busy ? "Restarting…" : "Apply and restart capture"));
+}
+const THEMES = ["auto", "light", "dark"];
+function useAppearance() {
+  const [theme, setTheme] = useSetting("sniffer.theme", "auto");
+  const [large, setLarge] = useSetting("sniffer.large", false);
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "auto") delete root.dataset.theme;else root.dataset.theme = theme;
+    if (large) root.dataset.size = "large";else delete root.dataset.size;
+  }, [theme, large]);
+  return {
+    theme,
+    cycleTheme: () => setTheme(t => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length]),
+    large,
+    setLarge
+  };
+}
+function useAlertNotifications(security, enabled) {
+  const seen = useRef(null);
+  useEffect(() => {
+    const high = (security?.alerts || []).filter(a => a.severity === "high");
+    if (seen.current === null) {
+      if (security) seen.current = new Set(high.map(a => a.id));
+      return;
+    }
+    const fresh = high.filter(a => !seen.current.has(a.id));
+    fresh.forEach(a => seen.current.add(a.id));
+    if (!enabled || !fresh.length) return;
+    try {
+      const audio = new (window.AudioContext || window.webkitAudioContext)();
+      const tone = audio.createOscillator();
+      const gain = audio.createGain();
+      tone.frequency.value = 880;
+      gain.gain.setValueAtTime(0.15, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.4);
+      tone.connect(gain).connect(audio.destination);
+      tone.start();
+      tone.stop(audio.currentTime + 0.4);
+    } catch (err) {}
+    if ("Notification" in window && Notification.permission === "granted") {
+      fresh.forEach(a => new Notification(`Security alert: ${a.title}`, {
+        body: a.detail,
+        tag: `alert-${a.id}`
+      }));
+    }
+  }, [security, enabled]);
+}
+function TopbarTools({
+  capture,
+  refresh,
+  notify,
+  setNotify
+}) {
+  const {
+    theme,
+    cycleTheme,
+    large,
+    setLarge
+  } = useAppearance();
+  const [settings, setSettings] = useState(false);
+  async function toggleNotify() {
+    if (!notify && "Notification" in window && Notification.permission === "default") {
+      try {
+        await Notification.requestPermission();
+      } catch (err) {}
+    }
+    setNotify(!notify);
+  }
+  return React.createElement("div", {
+    className: "tools"
+  }, React.createElement("button", {
+    className: "tool",
+    onClick: () => setSettings(s => !s),
+    "aria-expanded": settings,
+    title: "Interface and capture filter"
+  }, "Settings"), React.createElement("button", {
+    className: "tool",
+    onClick: toggleNotify,
+    "aria-pressed": notify,
+    title: notify ? "Pop-up and sound for high-severity alerts: on" : "Pop-up and sound for high-severity alerts: off"
+  }, "Alerts: ", notify ? "on" : "off"), React.createElement("button", {
+    className: "tool",
+    onClick: cycleTheme,
+    title: "Light, dark, or follow the computer"
+  }, "Theme: ", theme), React.createElement("button", {
+    className: "tool",
+    onClick: () => setLarge(!large),
+    "aria-pressed": large,
+    title: "Larger text, for projectors"
+  }, large ? "Normal text" : "Large text"), React.createElement("a", {
+    className: "tool",
+    href: "/report",
+    target: "_blank",
+    rel: "noopener"
+  }, "Report"), settings && React.createElement(SettingsPanel, {
+    onClose: () => setSettings(false),
+    refresh: refresh,
+    capture: capture
+  }));
 }
 function App() {
   const [filters, setFilters] = useState(NO_FILTERS);
@@ -977,6 +1591,9 @@ function App() {
     refresh
   } = usePolling(filters);
   const [selected, setSelected] = useState(null);
+  const [view, setView] = useSetting("sniffer.view", "packets");
+  const [notify, setNotify] = useSetting("sniffer.notify", false);
+  useAlertNotifications(security, notify);
   const capture = stats?.capture;
   const retention = stats?.retention;
   function focusHost(host) {
@@ -985,10 +1602,13 @@ function App() {
       ...NO_FILTERS,
       host
     });
-    const table = document.getElementById("packets");
-    if (table && table.getBoundingClientRect().top < 0) table.scrollIntoView({
-      behavior: "smooth"
-    });
+    setView("packets");
+    setTimeout(() => {
+      const table = document.getElementById("packets");
+      if (table && table.getBoundingClientRect().top < 0) table.scrollIntoView({
+        behavior: "smooth"
+      });
+    }, 0);
   }
   return React.createElement(React.Fragment, null, React.createElement("header", {
     className: "topbar"
@@ -1006,16 +1626,28 @@ function App() {
   }), !offline && React.createElement(CaptureButton, {
     capture: capture,
     refresh: refresh
-  })))), React.createElement("div", {
+  }))), React.createElement("div", {
+    className: "topbar-inner tools-row"
+  }, React.createElement(ViewTabs, {
+    view: view,
+    setView: setView
+  }), React.createElement(TopbarTools, {
+    capture: capture,
+    refresh: refresh,
+    notify: notify,
+    setNotify: setNotify
+  }))), React.createElement("div", {
     className: "app"
   }, React.createElement(Banners, {
     capture: capture,
     security: security,
     onFocus: focusHost
-  }), React.createElement(Summary, {
+  }), view === "packets" && React.createElement(React.Fragment, null, React.createElement(Summary, {
     stats: stats
   }), React.createElement(BandwidthChart, {
-    points: stats?.bandwidth
+    points: stats?.bandwidth,
+    apps: stats?.app_bandwidth,
+    appsEnabled: capture?.apps
   }), React.createElement("div", {
     className: "grid"
   }, React.createElement(PacketTable, {
@@ -1058,7 +1690,11 @@ function App() {
     hosts: stats?.top_hosts,
     retention: retention,
     onPick: focusHost
-  }))), React.createElement("footer", {
+  })))), view === "connections" && React.createElement(ConnectionsView, {
+    onFocus: focusHost
+  }), view === "devices" && React.createElement(DevicesView, {
+    onFocus: focusHost
+  }), view === "history" && React.createElement(HistoryView, null), React.createElement("footer", {
     className: "footer"
   }, "Packet Sniffer ", stats?.version || "", " \xB7 team Big Packet \xB7 capture only on your own device and network")));
 }
