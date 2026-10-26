@@ -136,7 +136,8 @@ function usePolling(filters) {
     return () => { stopped = true; clearInterval(timer); };
   }, []);
 
-  return { packets, stats, security, offline, paused, setPaused, filterError };
+  const refresh = () => tickRef.current?.();
+  return { packets, stats, security, offline, paused, setPaused, filterError, refresh };
 }
 
 function useWidth() {
@@ -473,9 +474,13 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
             {filtered ? `${rows.length} matching · ` : ""}{order === "newest" ? "Newest" : "Oldest"} first{kept} &middot; click a row to see its headers
           </div>
         </div>
-        <button className={paused ? "paused" : ""} onClick={() => setPaused(!paused)}>
+        <div className="head-buttons">
+          <a className="button" href={`/api/export/packets.csv?${filterQuery(filters)}`} download
+            title="Download the packets shown (with the current filters) as a spreadsheet">Export CSV</a>
+          <button className={paused ? "paused" : ""} onClick={() => setPaused(!paused)}>
           {paused ? "Resume" : "Pause"}
-        </button>
+          </button>
+        </div>
       </div>
       <FilterBar filters={filters} setFilters={setFilters} error={filterError} />
       <div className="table-area">
@@ -510,8 +515,8 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
                   <td className="program" title={p.app || "Program not known (another device, or a replayed file)"}>
                     {p.app || <span className="none">&mdash;</span>}
                   </td>
-                  <td>{withPort(p.src, p.sport)}</td>
-                  <td>{withPort(p.dst, p.dport)}</td>
+                  <td>{withPort(p.src, p.sport)}{p.src_name && <span className="hostname">{p.src_name}</span>}</td>
+                  <td>{withPort(p.dst, p.dport)}{p.dst_name && <span className="hostname">{p.dst_name}</span>}</td>
                   <td><span className={`badge p-${protoClass(p.proto)}`}>{p.proto}</span></td>
                   <td>{p.service || ""}</td>
                   <td className="num">{p.length}</td>
@@ -535,7 +540,70 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
   );
 }
 
-function SecurityPanel({ security, onFocus }) {
+// POST a JSON action to the sniffer. JSON, so a form on another website cannot do the same.
+async function postJSON(url, body = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (response.status === 401) window.location.reload();
+  const data = await response.json().catch(() => ({}));
+  return { ok: response.ok && data.ok !== false, ...data };
+}
+
+function AlertCard({ alert, defense, open, onToggle, onFocus, onFix, onUndo, busy }) {
+  const fixed = alert.fixed;
+  const canFix = defense?.available;
+  return (
+    <div className={`alert${open ? " open" : ""}`}>
+      <div className="alert-head">
+        <span className={`sev s-${alert.severity}`}>{SEVERITY_LABEL[alert.severity]}</span>
+        <span className="title">{alert.title}</span>
+        <span className="when">
+          {formatTime(alert.last_seen)}{alert.count > 1 ? ` · ×${alert.count.toLocaleString()}` : ""}
+          {fixed && <span className="fixed-tag">FIXED</span>}
+        </span>
+        <span className="detail">{alert.detail}</span>
+      </div>
+      <div className="alert-actions">
+        <button onClick={() => onFocus(alert.focus)}>Show packets</button>
+        {alert.advice && (
+          <button className={open ? "on" : ""} aria-expanded={open} onClick={onToggle}>
+            {open ? "Hide fix" : "How to fix"}
+          </button>
+        )}
+      </div>
+      {open && alert.advice && (
+        <div className="fix">
+          <p>{alert.advice.meaning}</p>
+          <ol>{alert.advice.steps.map(step => <li key={step}>{step}</li>)}</ol>
+          {fixed ? (
+            <div className="fix-done">
+              <span>&#10003; {fixed.label}{fixed.auto ? " (automatically)" : ""}</span>
+              <button disabled={busy} onClick={() => onUndo(fixed.id)}>Undo</button>
+            </div>
+          ) : alert.fix_label ? (
+            <div className="fix-do">
+              <button className="primary" disabled={!canFix || busy} onClick={() => onFix(alert.id)}>
+                {busy ? "Working…" : alert.fix_label}
+              </button>
+              {!canFix && defense?.reason && <span className="muted">{defense.reason}</span>}
+            </div>
+          ) : (
+            <div className="muted">No one-click fix for this one: follow the steps above.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SecurityPanel({ security, onFocus, refresh }) {
+  const [open, setOpen] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(null);
   if (!security) {
     return <div className="card"><div className="card-head"><div className="label">Security</div></div><div className="muted">Loading&hellip;</div></div>;
   }
@@ -547,7 +615,17 @@ function SecurityPanel({ security, onFocus }) {
       </div>
     );
   }
-  const { alerts, rules, checked } = security;
+  const { alerts, rules, checked, defense } = security;
+  const applied = defense?.applied || [];
+
+  async function act(url, body) {
+    setBusy(true);
+    const result = await postJSON(url, body);
+    setMessage({ ok: result.ok, text: result.message });
+    setBusy(false);
+    refresh();
+  }
+
   return (
     <div className="card">
       <div className="card-head">
@@ -563,21 +641,71 @@ function SecurityPanel({ security, onFocus }) {
           </div>
         ))}
       </div>
+      {message && (
+        <div className={`fix-message ${message.ok ? "good" : "bad"}`} role="status">
+          <span>{message.text}</span>
+          <button className="link" onClick={() => setMessage(null)}>Dismiss</button>
+        </div>
+      )}
       {alerts.length === 0 ? (
         <div className="all-clear">No threats detected so far.</div>
       ) : (
         <div className="alerts">
           {alerts.map(a => (
-            <button className="alert" key={a.id} onClick={() => onFocus(a.focus)} title={`Show packets to or from ${a.focus}`}>
-              <span className={`sev s-${a.severity}`}>{SEVERITY_LABEL[a.severity]}</span>
-              <span className="title">{a.title}</span>
-              <span className="when">{formatTime(a.last_seen)}{a.count > 1 ? ` · ×${a.count.toLocaleString()}` : ""}</span>
-              <span className="detail">{a.detail}</span>
-            </button>
+            <AlertCard
+              key={a.id}
+              alert={a}
+              defense={defense}
+              open={!!open[a.id]}
+              onToggle={() => setOpen(o => ({ ...o, [a.id]: !o[a.id] }))}
+              onFocus={onFocus}
+              onFix={id => act("/api/defense/apply", { alert_id: id })}
+              onUndo={id => act("/api/defense/undo", { fix_id: id })}
+              busy={busy}
+            />
           ))}
         </div>
       )}
+      <div className="protection">
+        <div className="protection-head">
+          <span className="label">Protection</span>
+          <span className="muted">
+            {defense?.auto_block ? "Auto-block on" : "Auto-block off"}
+            {" · "}
+            <a href="/api/export/alerts.csv" download>Export alerts (CSV)</a>
+          </span>
+        </div>
+        {applied.length === 0 ? (
+          <div className="muted">
+            No fixes applied.{defense && !defense.available && defense.reason ? ` ${defense.reason}` : ""}
+          </div>
+        ) : (
+          applied.map(f => (
+            <div className="applied" key={f.id}>
+              <span>{f.label}{f.auto ? " (auto)" : ""}<small>{formatTime(f.time)}</small></span>
+              <button disabled={busy} onClick={() => act("/api/defense/undo", { fix_id: f.id })}>Undo</button>
+            </div>
+          ))
+        )}
+      </div>
     </div>
+  );
+}
+
+function CaptureButton({ capture, refresh }) {
+  const [busy, setBusy] = useState(false);
+  if (!capture) return null;
+  const running = capture.running;
+  async function toggle() {
+    setBusy(true);
+    await postJSON(`/api/capture/${running ? "stop" : "start"}`);
+    setBusy(false);
+    refresh();
+  }
+  return (
+    <button className={`capture-button ${running ? "stop" : "start"}`} disabled={busy} onClick={toggle}>
+      {running ? "Stop capture" : "Start capture"}
+    </button>
   );
 }
 
@@ -659,7 +787,7 @@ function TopHosts({ hosts, retention, onPick }) {
         {list.map(h => (
           <button className="host" key={h.host} onClick={() => onPick(h.host)}
             title={`${h.packets.toLocaleString()} packets. Click to show only this host.`}>
-            <span className="name">{h.host}</span>
+            <span className="name">{h.host}{h.name && <small>{h.name}</small>}</span>
             <span className="bar"><div style={{ width: `${(100 * h.bytes) / max}%` }} /></span>
             <span className="size">{formatBytes(h.bytes)}</span>
           </button>
@@ -726,7 +854,7 @@ function PacketDetails({ packet }) {
 
 function App() {
   const [filters, setFilters] = useState(NO_FILTERS);
-  const { packets, stats, security, offline, paused, setPaused, filterError } = usePolling(filters);
+  const { packets, stats, security, offline, paused, setPaused, filterError, refresh } = usePolling(filters);
   const [selected, setSelected] = useState(null);
 
   const capture = stats?.capture;
@@ -748,7 +876,10 @@ function App() {
           <div className="layers"><span>ETH</span><span>IP</span><span>TCP/UDP</span></div>
           <h1>Packet Sniffer Dashboard</h1>
         </div>
-        <StatusPill capture={capture} offline={offline} />
+        <div className="topbar-right">
+          <StatusPill capture={capture} offline={offline} />
+          {!offline && <CaptureButton capture={capture} refresh={refresh} />}
+        </div>
       </div>
     </header>
     <div className="app">
@@ -773,7 +904,7 @@ function App() {
         <div className="side">
           {/* First, so a clicked packet's headers are always on screen */}
           <PacketDetails packet={selected} />
-          <SecurityPanel security={security} onFocus={focusHost} />
+          <SecurityPanel security={security} onFocus={focusHost} refresh={refresh} />
           <Protocols
             protocols={stats?.protocols}
             retention={retention}
