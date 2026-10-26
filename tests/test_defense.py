@@ -32,15 +32,15 @@ def test_blocking_an_attacker_and_undoing_it():
     ok, message = d.apply({"action": "block_ip", "ip": ATTACKER})
     assert (ok, message) == (True, f"Blocked {ATTACKER} (in and out)")
     assert netsh.commands == [
-        ["advfirewall", "firewall", "add", "rule", f"name=PacketSniffer-block-{ATTACKER}", "dir=in",
+        ["netsh", "advfirewall", "firewall", "add", "rule", f"name=PacketSniffer-block-{ATTACKER}", "dir=in",
          "action=block", f"remoteip={ATTACKER}"],
-        ["advfirewall", "firewall", "add", "rule", f"name=PacketSniffer-block-{ATTACKER}", "dir=out",
+        ["netsh", "advfirewall", "firewall", "add", "rule", f"name=PacketSniffer-block-{ATTACKER}", "dir=out",
          "action=block", f"remoteip={ATTACKER}"],
     ]
     assert d.apply({"action": "block_ip", "ip": ATTACKER}) == (True, f"Already done: Blocked {ATTACKER} (in and out)")
     (applied,) = d.status()["applied"]
     assert d.undo(applied["id"]) == (True, f"Undone: Blocked {ATTACKER} (in and out)")
-    assert netsh.commands[-1] == ["advfirewall", "firewall", "delete", "rule", f"name=PacketSniffer-block-{ATTACKER}"]
+    assert netsh.commands[-1] == ["netsh", "advfirewall", "firewall", "delete", "rule", f"name=PacketSniffer-block-{ATTACKER}"]
     assert d.status()["applied"] == []
 
 
@@ -48,17 +48,17 @@ def test_pinning_the_real_mac_of_a_spoofed_router():
     d, netsh = defender()
     ok, message = d.apply({"action": "pin_arp", "ip": ROUTER, "mac": ROUTER_MAC})
     assert ok and message == f"Pinned {ROUTER} to its real MAC {ROUTER_MAC}"
-    assert netsh.commands == [["interface", "ipv4", "add", "neighbors", "Wi-Fi", ROUTER, "00-1a-2b-3c-4d-5e",
+    assert netsh.commands == [["netsh", "interface", "ipv4", "add", "neighbors", "Wi-Fi", ROUTER, "00-1a-2b-3c-4d-5e",
                                "store=active"]]
     d.undo(d.status()["applied"][0]["id"])
-    assert netsh.commands[-1] == ["interface", "ipv4", "delete", "neighbors", "Wi-Fi", ROUTER]
+    assert netsh.commands[-1] == ["netsh", "interface", "ipv4", "delete", "neighbors", "Wi-Fi", ROUTER]
 
 
 def test_blocking_a_cleartext_protocol_going_out():
     d, netsh = defender()
     assert d.apply({"action": "block_port", "port": 23, "protocol": "TCP", "service": "Telnet"}) == (
         True, "Blocked outgoing Telnet (TCP port 23)")
-    assert netsh.commands == [["advfirewall", "firewall", "add", "rule", "name=PacketSniffer-block-outgoing-TCP-23",
+    assert netsh.commands == [["netsh", "advfirewall", "firewall", "add", "rule", "name=PacketSniffer-block-outgoing-TCP-23",
                                "dir=out", "action=block", "protocol=TCP", "remoteport=23"]]
 
 
@@ -84,14 +84,16 @@ def test_fixes_need_administrator_rights_and_windows():
     ok, text = d.apply({"action": "block_ip", "ip": ATTACKER})
     assert not ok and "Run PacketSniffer as Administrator" in text
     assert netsh.commands == [] and d.status()["available"] is False
-    linux = Defender(protected=[ME], is_admin=lambda: True, platform="linux")
-    assert "Windows only" in linux.status()["reason"]
+    other = Defender(protected=[ME], is_admin=lambda: True, platform="sunos5")
+    assert "Windows, Linux and macOS only" in other.status()["reason"]
+    linux = Defender(protected=[ME], is_admin=lambda: False, platform="linux")
+    assert linux.status()["reason"] == "Run PacketSniffer with sudo to apply fixes."
 
 
 def test_a_command_windows_refuses_is_reported_and_not_recorded():
     d, _ = defender(ok=False)
     ok, text = d.apply({"action": "block_ip", "ip": ATTACKER})
-    assert not ok and text.startswith("Windows refused")
+    assert not ok and text.startswith("The system refused")
     assert d.status()["applied"] == []
 
 
@@ -132,3 +134,44 @@ def test_fix_labels():
     assert fix_label(None) is None
     assert fix_label({"action": "pin_arp", "ip": ROUTER, "mac": ROUTER_MAC}) == f"Pin the real MAC of {ROUTER}"
     assert advice({"rule": "unknown", "title": "x", "detail": "something"})["meaning"] == "something"
+
+
+def test_linux_commands():
+    netsh = FakeNetsh()
+    d = Defender(interface="wlan0", protected=[ME], run=netsh, is_admin=lambda: True, platform="linux")
+    d.apply({"action": "block_ip", "ip": ATTACKER})
+    d.apply({"action": "block_port", "port": 23, "protocol": "TCP", "service": "Telnet"})
+    d.apply({"action": "pin_arp", "ip": ROUTER, "mac": "00-1A-2B-3C-4D-5E"})
+    d.apply({"action": "disable_redirects"})
+    comment = ["-m", "comment", "--comment"]
+    assert netsh.commands == [
+        ["iptables", "-I", "INPUT", "-s", ATTACKER, "-j", "DROP", *comment, f"PacketSniffer-block-{ATTACKER}"],
+        ["iptables", "-I", "OUTPUT", "-d", ATTACKER, "-j", "DROP", *comment, f"PacketSniffer-block-{ATTACKER}"],
+        ["iptables", "-I", "OUTPUT", "-p", "tcp", "--dport", "23", "-j", "DROP", *comment,
+         "PacketSniffer-block-outgoing-TCP-23"],
+        ["ip", "neigh", "replace", ROUTER, "lladdr", "00:1a:2b:3c:4d:5e", "dev", "wlan0", "nud", "permanent"],
+        ["sysctl", "-w", "net.ipv4.conf.all.accept_redirects=0"],
+    ]
+    first = min(f["id"] for f in d.status()["applied"])
+    d.undo(first)
+    assert netsh.commands[-2][:3] == ["iptables", "-D", "INPUT"]
+    d.apply({"action": "block_ip", "ip": "2001:db8::66"})
+    assert netsh.commands[-1][0] == "ip6tables"
+
+
+def test_macos_pins_arp_and_turns_off_redirects_but_cannot_block():
+    netsh = FakeNetsh()
+    d = Defender(protected=[ME], run=netsh, is_admin=lambda: True, platform="darwin")
+    assert d.apply({"action": "pin_arp", "ip": ROUTER, "mac": ROUTER_MAC})[0]
+    assert d.apply({"action": "disable_redirects"}) == (True, "Stopped obeying ICMP redirects")
+    ok, message = d.apply({"action": "block_ip", "ip": ATTACKER})
+    assert not ok and "pf firewall" in message
+    assert netsh.commands == [["arp", "-s", ROUTER, ROUTER_MAC], ["sysctl", "-w", "net.inet.icmp.drop_redirect=1"]]
+
+
+def test_windows_turns_off_icmp_redirects_and_back_on():
+    d, netsh = defender()
+    assert d.apply({"action": "disable_redirects"}) == (True, "Stopped obeying ICMP redirects")
+    d.undo(d.status()["applied"][0]["id"])
+    assert netsh.commands == [["netsh", "interface", "ipv4", "set", "global", "icmpredirects=disabled"],
+                              ["netsh", "interface", "ipv4", "set", "global", "icmpredirects=enabled"]]
