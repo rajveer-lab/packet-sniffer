@@ -16,6 +16,13 @@ a pattern typical of an attack, or of an unsafe setup, shows up:
     Passwords       a password actually crosses the network in clear text
                     (FTP/POP3 PASS, IMAP LOGIN, HTTP Basic auth or a login form,
                     a Telnet password prompt); the alert never shows the password
+    Bad domain      a program looks up a domain on the blocklist
+    DNS tunneling   data hidden in DNS names: very long labels, or many random
+                    subdomains of one domain in a minute
+    Unusual upload  this computer sends a large amount to one outside address
+    Rogue DHCP      a second DHCP server answers; it could make itself your
+                    router or DNS server
+    ICMP redirect   a device tells this computer to send traffic another way
 
 Every alert also says which fix applies, if the computer can protect itself
 (see core/defense.py): blocking the attacker's IP, pinning the real MAC of a
@@ -28,6 +35,8 @@ capture gives the same alerts as the live traffic did.
 """
 
 import base64
+import ipaddress
+import os
 import re
 import threading
 from collections import Counter, OrderedDict, deque
@@ -59,6 +68,40 @@ FORM_PASSWORD = re.compile(rb"(?:^|&)(?:password|passwd|pass|pwd)=([^&\s]+)", re
 FORM_USER = re.compile(rb"(?:^|&)(?:username|user|login|email)=([^&\s]+)", re.I | re.M)
 
 SEVERITIES = ("high", "medium", "low")
+
+BLOCKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blocklist.txt")
+
+
+def load_blocklist(path=BLOCKLIST_FILE):
+    """Domains from a file: one per line, or hosts-file lines like '0.0.0.0 bad.example'."""
+    domains = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                domains.append(line.split()[-1])
+    return domains
+
+
+LONG_LABEL = 50          # a DNS label this long hides data; real names almost never need it
+RANDOM_LABEL = 20        # labels at least this long count towards the many-subdomains check
+
+
+def is_local_address(ip):
+    """A private, link-local or loopback address: this computer or its own network."""
+    try:
+        address = ipaddress.ip_address(ip)
+    except (TypeError, ValueError):
+        return False
+    return address.is_private or address.is_link_local or address.is_loopback
+
+
+def is_outside_address(ip):
+    try:
+        address = ipaddress.ip_address(ip)
+    except (TypeError, ValueError):
+        return False
+    return address.is_global and not address.is_multicast
 
 
 def is_tcp_probe(record):
@@ -98,7 +141,8 @@ def is_udp_probe(record):
 class SecurityMonitor:
     def __init__(self, scan_ports=15, sweep_hosts=10, window=10,
                  flood_syns=100, flood_window=5, brute_attempts=20, brute_window=60,
-                 cooldown=60, max_alerts=200):
+                 cooldown=60, max_alerts=200, blocklist=None, upload_mb=50, upload_window=60,
+                 tunnel_subdomains=25, tunnel_window=60):
         self.scan_ports = scan_ports
         self.sweep_hosts = sweep_hosts
         self.window = window
@@ -107,6 +151,13 @@ class SecurityMonitor:
         self.brute_attempts = brute_attempts
         self.brute_window = brute_window
         self.cooldown = cooldown
+        if blocklist is None:
+            blocklist = load_blocklist()
+        self.blocklist = {d.strip().lower().rstrip(".") for d in blocklist if d.strip()}
+        self.upload_bytes = int(upload_mb * 1024 * 1024)
+        self.upload_window = upload_window
+        self.tunnel_subdomains = tunnel_subdomains
+        self.tunnel_window = tunnel_window
 
         self._lock = threading.Lock()
         self._alerts = deque(maxlen=max_alerts)
@@ -119,6 +170,9 @@ class SecurityMonitor:
         self._logins = {}               # (src, dst, port) -> deque of connection attempt times
         self._users = {}                # connection -> (user name, last seen) from USER commands
         self._prompted = {}             # Telnet connection -> (typed bytes, last seen) after "Password:"
+        self._uploads = {}              # (src, dst) -> [deque of (time, bytes), running total]
+        self._subdomains = {}           # (src, domain) -> OrderedDict long label -> last seen
+        self._dhcp_server = None        # the first DHCP server seen answering
         self._next_cleanup = None
         self.checked = 0
         self.on_alert = None            # optional callback for every new alert, e.g. auto-block
@@ -139,6 +193,17 @@ class SecurityMonitor:
                             f"login service within {brute_window} s"},
             {"rule": "credentials", "name": "Password in clear text", "severity": "high",
              "description": "a password is sent unencrypted over FTP, POP3, IMAP, Telnet or HTTP"},
+            {"rule": "bad_domain", "name": "Blocklisted domain", "severity": "high",
+             "description": f"a program looks up one of {len(self.blocklist)} domains on the blocklist"},
+            {"rule": "dns_tunnel", "name": "DNS tunneling", "severity": "medium",
+             "description": f"DNS names hide data: labels of {LONG_LABEL}+ characters, or {tunnel_subdomains}+ "
+                            f"random subdomains of one domain within {tunnel_window} s"},
+            {"rule": "large_upload", "name": "Unusual upload", "severity": "medium",
+             "description": f"this computer sends {upload_mb:g}+ MB to one outside address within {upload_window} s"},
+            {"rule": "rogue_dhcp", "name": "Rogue DHCP server", "severity": "high",
+             "description": "a second DHCP server answers; it could make itself your router or DNS server"},
+            {"rule": "icmp_redirect", "name": "ICMP redirect", "severity": "medium",
+             "description": "a device tells this computer to send traffic through a different router"},
         ]
 
     @staticmethod
@@ -158,6 +223,10 @@ class SecurityMonitor:
             self._check_arp_spoof(record, now)
             self._check_cleartext(record, now)
             self._check_brute_force(record, now)
+            self._check_dns(record, now)
+            self._check_upload(record, now)
+            self._check_dhcp(record, now)
+            self._check_redirect(record, now)
             if payload:
                 self._check_credentials(record, payload, now)
             if self._next_cleanup is None or now >= self._next_cleanup:
@@ -251,6 +320,80 @@ class SecurityMonitor:
                     detail=f"{name} to {r['dst']}:{r['dport']} sends logins and data in clear text{used_by}",
                     src=r["src"], dst=r["dst"], focus=r["src"],
                     fix=block_port_fix(name, r["dport"]))
+
+    def _check_dns(self, r, now):
+        name = r.get("dns_query")
+        if not name or r["dport"] != 53:     # queries only, so each lookup counts once
+            return
+        name = name.lower().rstrip(".")
+        labels = name.split(".")
+        by = f" ({r['app']})" if r.get("app") else ""
+        for i in range(len(labels) - 1):
+            parent = ".".join(labels[i:])
+            if parent in self.blocklist:
+                self._alert("bad_domain", "high", (r["src"], parent), now,
+                            title=f"Blocklisted domain {parent}",
+                            detail=f"{r['src']}{by} looked up {name}, which is on the blocklist",
+                            src=r["src"], dst=r["dst"], focus=r["src"])
+                break
+        domain = ".".join(labels[-2:])
+        longest = max(labels, key=len)
+        if len(longest) >= LONG_LABEL:
+            self._alert("dns_tunnel", "medium", (r["src"], domain), now,
+                        title=f"Possible DNS tunneling to {domain}",
+                        detail=f"{r['src']}{by} looked up a name with a {len(longest)}-character label; "
+                               f"data can be hidden in names like that",
+                        src=r["src"], dst=r["dst"], focus=r["src"])
+        elif len(labels) >= 3 and len(labels[0]) >= RANDOM_LABEL:
+            count = self._remember(self._subdomains, (r["src"], domain), labels[0], now, self.tunnel_window)
+            if count >= self.tunnel_subdomains:
+                self._alert("dns_tunnel", "medium", (r["src"], domain), now,
+                            title=f"Possible DNS tunneling to {domain}",
+                            detail=f"{r['src']}{by} looked up {count} different random-looking names under "
+                                   f"{domain} within {self.tunnel_window} s",
+                            src=r["src"], dst=r["dst"], focus=r["src"])
+
+    def _check_upload(self, r, now):
+        if not (is_local_address(r["src"]) and is_outside_address(r["dst"])):
+            return
+        entry = self._uploads.setdefault((r["src"], r["dst"]), [deque(), 0])
+        size = r.get("length", 0)
+        sent, entry[1] = entry[0], entry[1] + size
+        sent.append((now, size))
+        while sent[0][0] < now - self.upload_window:
+            entry[1] -= sent.popleft()[1]
+        if entry[1] >= self.upload_bytes:
+            name = r.get("dst_name")
+            to = f"{r['dst']} ({name})" if name else r["dst"]
+            by = f" by {r['app']}" if r.get("app") else ""
+            self._alert("large_upload", "medium", (r["src"], r["dst"]), now,
+                        title=f"Unusual upload to {to}",
+                        detail=f"{entry[1] / 1024 / 1024:.0f} MB sent within {self.upload_window} s{by}",
+                        src=r["src"], dst=r["dst"], focus=r["dst"],
+                        fix={"action": "block_ip", "ip": r["dst"]})
+
+    def _check_dhcp(self, r, now):
+        if r.get("dhcp_type") not in ("offer", "ack"):
+            return
+        server = r.get("dhcp_server") or r["src"]
+        if self._dhcp_server is None:
+            self._dhcp_server = server
+        elif server != self._dhcp_server:
+            self._alert("rogue_dhcp", "high", server, now,
+                        title=f"Rogue DHCP server {server}",
+                        detail=f"{server} hands out network settings as well as {self._dhcp_server}; a fake DHCP "
+                               f"server can make itself your router or DNS server",
+                        src=server, dst=r["dst"], focus=server,
+                        fix={"action": "block_ip", "ip": server})
+
+    def _check_redirect(self, r, now):
+        if r["proto"] != "ICMP" or r.get("icmp_type") != 5:
+            return
+        self._alert("icmp_redirect", "medium", r["src"], now,
+                    title=f"ICMP redirect from {r['src']}",
+                    detail=f"{r['src']} told {r['dst']} to send traffic through a different router",
+                    src=r["src"], dst=r["dst"], focus=r["src"],
+                    fix={"action": "disable_redirects"})
 
     def _check_brute_force(self, r, now):
         if r["proto"] != "TCP" or r["flags"] != ["SYN"] or r["dport"] not in LOGIN_SERVICES:
@@ -371,6 +514,10 @@ class SecurityMonitor:
             del self._syns[key]
         for key in [k for k, times in self._logins.items() if times[-1] < now - self.brute_window]:
             del self._logins[key]
+        for key in [k for k, (sent, _) in self._uploads.items() if not sent or sent[-1][0] < now - self.upload_window]:
+            del self._uploads[key]
+        for key in [k for k, seen in self._subdomains.items() if next(reversed(seen.values())) < now - self.tunnel_window]:
+            del self._subdomains[key]
         for table in (self._users, self._prompted):
             for key in [k for k, (_, seen) in table.items() if seen < now - self.cooldown]:
                 del table[key]
