@@ -17,7 +17,10 @@ function formatBytes(n) {
 }
 
 function formatTime(epochSeconds) {
-  return new Date(epochSeconds * 1000).toLocaleTimeString("en-GB", { hour12: false });
+  // 12-hour clock with a two-digit hour, so times line up in the table: 04:38:14 PM
+  return new Date(epochSeconds * 1000).toLocaleTimeString("en-US", {
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
+  });
 }
 
 function formatDuration(seconds) {
