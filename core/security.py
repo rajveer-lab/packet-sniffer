@@ -17,6 +17,10 @@ a pattern typical of an attack, or of an unsafe setup, shows up:
                     (FTP/POP3 PASS, IMAP LOGIN, HTTP Basic auth or a login form,
                     a Telnet password prompt); the alert never shows the password
 
+Every alert also says which fix applies, if the computer can protect itself
+(see core/defense.py): blocking the attacker's IP, pinning the real MAC of a
+spoofed address, or blocking a cleartext protocol.
+
 The same rule firing again for the same source updates the open alert (its
 count and detail) instead of adding a new one, until it has been quiet for
 ``cooldown`` seconds. Windows use the packets' own timestamps, so a replayed
@@ -67,6 +71,13 @@ def is_tcp_probe(record):
     return record["proto"] == "TCP" and "ACK" not in flags and "RST" not in flags
 
 
+def block_port_fix(service, port):
+    """Block a cleartext protocol going out. Not offered for HTTP: half the web still uses it."""
+    if service == "HTTP":
+        return None
+    return {"action": "block_port", "port": port, "protocol": "TCP", "service": service}
+
+
 def describe_secret(secret):
     """Say how long a captured password is, never what it is."""
     n = len(secret)
@@ -110,6 +121,7 @@ class SecurityMonitor:
         self._prompted = {}             # Telnet connection -> (typed bytes, last seen) after "Password:"
         self._next_cleanup = None
         self.checked = 0
+        self.on_alert = None            # optional callback for every new alert, e.g. auto-block
 
         self.rules = [
             {"rule": "port_scan", "name": "Port scan", "severity": "high",
@@ -165,6 +177,14 @@ class SecurityMonitor:
                 "checked": self.checked,
             }
 
+    def get(self, alert_id):
+        """One alert by id (a copy), or None if it is unknown or too old."""
+        with self._lock:
+            for alert in self._alerts:
+                if alert["id"] == alert_id:
+                    return dict(alert)
+        return None
+
     # ---- rules -------------------------------------------------------------
 
     def _check_port_scan(self, r, now):
@@ -176,7 +196,8 @@ class SecurityMonitor:
             self._alert("port_scan", "high", (r["src"], r["dst"]), now,
                         title=f"Port scan from {r['src']}",
                         detail=f"{ports} {kind} ports probed on {r['dst']} within {self.window} s",
-                        src=r["src"], dst=r["dst"], focus=r["src"])
+                        src=r["src"], dst=r["dst"], focus=r["src"],
+                        fix={"action": "block_ip", "ip": r["src"]})
 
     def _check_host_sweep(self, r, now):
         ping = r["proto"] == "ICMP" and r.get("icmp_type") == 8
@@ -189,7 +210,8 @@ class SecurityMonitor:
             self._alert("host_sweep", "medium", r["src"], now,
                         title=f"Host sweep from {r['src']}",
                         detail=f"{targets} addresses {how} within {self.window} s",
-                        src=r["src"], dst=None, focus=r["src"])
+                        src=r["src"], dst=None, focus=r["src"],
+                        fix={"action": "block_ip", "ip": r["src"]})
 
     def _check_syn_flood(self, r, now):
         if r["proto"] != "TCP" or r["flags"] != ["SYN"] or r["dst"] is None:
@@ -215,7 +237,8 @@ class SecurityMonitor:
             self._alert("arp_spoof", "high", ip, now,
                         title=f"ARP spoofing of {ip}",
                         detail=f"{ip} moved from {known} to {mac}; traffic for it may be intercepted",
-                        src=mac, dst=ip, focus=mac)
+                        src=mac, dst=ip, focus=mac,
+                        fix={"action": "pin_arp", "ip": ip, "mac": known})
 
     def _check_cleartext(self, r, now):
         # PSH means the client actually sent data; a scan's bare SYN to port 23 does not count.
@@ -226,7 +249,8 @@ class SecurityMonitor:
         self._alert("cleartext", severity, (name, r["src"]), now,
                     title=f"Unencrypted {name} from {r['src']}",
                     detail=f"{name} to {r['dst']}:{r['dport']} sends logins and data in clear text{used_by}",
-                    src=r["src"], dst=r["dst"], focus=r["src"])
+                    src=r["src"], dst=r["dst"], focus=r["src"],
+                    fix=block_port_fix(name, r["dport"]))
 
     def _check_brute_force(self, r, now):
         if r["proto"] != "TCP" or r["flags"] != ["SYN"] or r["dport"] not in LOGIN_SERVICES:
@@ -242,7 +266,8 @@ class SecurityMonitor:
                         title=f"{service} brute force from {r['src']}",
                         detail=f"{len(times)} login connections to {r['dst']}:{r['dport']} "
                                f"within {self.brute_window} s",
-                        src=r["src"], dst=r["dst"], focus=r["src"])
+                        src=r["src"], dst=r["dst"], focus=r["src"],
+                        fix={"action": "block_ip", "ip": r["src"]})
 
     def _check_credentials(self, r, payload, now):
         to_server = r["dport"] in CREDENTIAL_PORTS
@@ -308,7 +333,8 @@ class SecurityMonitor:
                     title=f"{service} password sent in clear text",
                     detail=f"{who} on {r['src']} logged in to {r['dst']}:{r['dport']} with "
                            f"{describe_secret(secret)} that anyone on the network can read",
-                    src=r["src"], dst=r["dst"], focus=r["src"])
+                    src=r["src"], dst=r["dst"], focus=r["src"],
+                    fix=block_port_fix(service, r["dport"]))
 
     # ---- helpers -----------------------------------------------------------
 
@@ -322,7 +348,7 @@ class SecurityMonitor:
             seen.popitem(last=False)
         return len(seen)
 
-    def _alert(self, rule, severity, key, now, title, detail, src, dst, focus):
+    def _alert(self, rule, severity, key, now, title, detail, src, dst, focus, fix=None):
         alert = self._open.get((rule, key))
         if alert and now - alert["last_seen"] < self.cooldown:
             alert.update(last_seen=now, count=alert["count"] + 1, detail=detail)
@@ -330,9 +356,11 @@ class SecurityMonitor:
         self._last_id += 1
         alert = {"id": self._last_id, "rule": rule, "severity": severity, "title": title,
                  "detail": detail, "src": src, "dst": dst, "focus": focus,
-                 "time": now, "last_seen": now, "count": 1}
+                 "time": now, "last_seen": now, "count": 1, "fix": fix}
         self._alerts.append(alert)
         self._open[(rule, key)] = alert
+        if self.on_alert:
+            self.on_alert(dict(alert))
 
     def _cleanup(self, now):
         """Drop tracking state that has gone quiet, so memory stays bounded."""
