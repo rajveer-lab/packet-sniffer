@@ -72,6 +72,9 @@ HOW_TO_RUN = f"""Packet Sniffer {__version__}
 
 3. Close the black window (or press Ctrl+C in it) to stop.
 
+One-click security fixes (blocking an attacker in Windows Firewall) need
+Administrator rights: right-click PacketSniffer.exe, Run as administrator.
+
 Demo without capturing (open a terminal in this folder):
 
     PacketSniffer.exe --pcap samples\\sample_traffic.pcap --loop
