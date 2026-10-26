@@ -69,7 +69,7 @@ def test_alerts_endpoint(client, monitor):
     assert data["enabled"] is True
     assert [a["rule"] for a in data["alerts"]] == ["port_scan"]
     assert data["counts"]["high"] == 1
-    assert len(data["rules"]) == 7
+    assert len(data["rules"]) == 12
 
 
 def test_alerts_endpoint_without_a_monitor(store):
@@ -184,10 +184,11 @@ class ControllablePipeline(FakePipeline):
     def stop_from_dashboard(self):
         self.running, self.stopped = False, "stopped from the dashboard"
 
-    def restart(self):
-        if self.running:
+    def restart(self, iface=None, bpf_filter=None, change=False):
+        if self.running and not change:
             return False
         self.running, self.stopped = True, None
+        self.changed_to = (iface, bpf_filter) if change else None
         return True
 
 
@@ -223,3 +224,93 @@ def test_top_hosts_get_names_from_dns(store):
     data = create_app(store, names=names).test_client().get("/api/stats").get_json()
     assert {"host": "203.0.113.10", "name": "video.example.com"} in [
         {"host": h["host"], "name": h["name"]} for h in data["top_hosts"]]
+
+
+
+# ---- connections, devices, bytes, pcap, history, interfaces and the report ----------
+
+def test_connections_devices_and_packet_bytes():
+    from scapy.layers.inet import IP, TCP
+    from scapy.layers.l2 import Ether
+
+    from core.devices import DeviceTable
+    from core.flows import FlowTable
+
+    store, flows, devices = TrafficStore(), FlowTable(), DeviceTable()
+    pkt = Ether(src="3c:22:fb:12:34:56", dst="00:1a:2b:3c:4d:5e") / IP(src="192.168.1.5", dst="203.0.113.10") / TCP(
+        sport=52344, dport=443, flags="S", seq=1000)
+    record = {"time": time.time(), "length": len(pkt), "proto": "TCP", "src": "192.168.1.5", "dst": "203.0.113.10",
+              "sport": 52344, "dport": 443, "flags": ["SYN"], "seq": 1000, "ack": 0, "payload_len": 0,
+              "src_mac": "3c:22:fb:12:34:56", "info": "52344 -> 443 [SYN]"}
+    flows.update(record)
+    devices.update(record)
+    stored = store.add(record, raw=(bytes(pkt), 1))
+    client = create_app(store, flows=flows, devices=devices).test_client()
+
+    data = client.get("/api/connections").get_json()
+    assert data["connections"][0]["state"] == "SYN sent" and data["summary"]["tcp"] == 1
+    assert client.get("/api/devices").get_json()["devices"][0]["mac"] == "3c:22:fb:12:34:56"
+    hexview = client.get(f"/api/packets/{stored['id']}/bytes").get_json()
+    assert hexview["hex"] == bytes(pkt).hex()
+    assert [layer["name"] for layer in hexview["layers"]] == ["Ethernet", "IP", "TCP"]
+    assert client.get("/api/packets/999/bytes").status_code == 404
+
+
+def test_pcap_download_opens_in_wireshark(store, tmp_path):
+    from scapy.layers.inet import IP, UDP
+    from scapy.layers.l2 import Ether
+    from scapy.utils import rdpcap
+
+    pkt = Ether() / IP(src="192.168.1.9", dst="8.8.8.8") / UDP(sport=40122, dport=53)
+    store.add({"time": 1_760_000_000.25, "length": len(pkt), "proto": "UDP", "src": "192.168.1.9", "dst": "8.8.8.8",
+               "sport": 40122, "dport": 53, "flags": [], "info": ""}, raw=(bytes(pkt), 1))
+    response = create_app(store).test_client().get("/api/export/packets.pcap?proto=UDP")
+    assert response.headers["Content-Disposition"] == 'attachment; filename="packets.pcap"'
+    saved = tmp_path / "packets.pcap"
+    saved.write_bytes(response.data)
+    (back,) = rdpcap(str(saved))
+    assert bytes(back) == bytes(pkt) and float(back.time) == 1_760_000_000.25
+
+
+def test_history_endpoint(store, tmp_path):
+    from core.history import History
+
+    history = History(str(tmp_path / "h.db"))
+    history.start_session("live", "Wi-Fi")
+    data = create_app(store, history=history).test_client().get("/api/history?hours=6").get_json()
+    assert data["enabled"] is True and data["hours"] == 6 and data["sessions"][0]["source"] == "Wi-Fi"
+    assert create_app(store).test_client().get("/api/history").get_json() == {"enabled": False}
+
+
+def capture_driver_missing():
+    from core.capture import capture_problem
+
+    return capture_problem() is not None
+
+
+@pytest.mark.skipif(capture_driver_missing(), reason="checking a capture filter needs Npcap/libpcap")
+def test_changing_interface_and_filter(store):
+    pipeline = ControllablePipeline()
+    client = create_app(store, pipeline).test_client()
+    assert client.get("/api/interfaces").get_json()["interfaces"]        # this computer has some
+    bad_filter = client.post("/api/capture/start", json={"filter": "tcp port banana"})
+    assert bad_filter.status_code == 400 and "Not a valid capture filter" in bad_filter.get_json()["message"]
+    assert client.post("/api/capture/start", json={"iface": "No Such Adapter"}).status_code == 400
+    ok = client.post("/api/capture/start", json={"filter": "tcp port 443"})
+    assert ok.get_json()["ok"] and pipeline.changed_to == (None, "tcp port 443")
+
+
+def test_report_page_escapes_captured_text(store, monitor):
+    from core.flows import FlowTable
+
+    flows = FlowTable()
+    flows.update({"time": 100, "proto": "TCP", "src": "192.168.1.5", "sport": 50000, "dst": "203.0.113.10",
+                  "dport": 443, "flags": ["SYN"], "seq": 1, "ack": 0, "payload_len": 0, "length": 60,
+                  "dst_name": "<script>alert(1)</script>.example"})
+    scan(monitor)
+    page = create_app(store, FakePipeline(), monitor, flows=flows).test_client().get("/report")
+    html = page.get_data(as_text=True)
+    assert page.status_code == 200 and "Network traffic report" in html
+    assert "Port scan from 192.168.1.66" in html and "Block 192.168.1.66 if you do not recognise it." in html
+    assert "<script>alert(1)</script>" not in html and "&lt;script&gt;" in html
+    assert '<script src="/static/report.js"></script>' in html
