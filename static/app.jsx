@@ -263,47 +263,78 @@ function bandwidthScale(maxBytes) {
   return { top: top * size, ticks: [0, top / 2, top].map(v => ({ value: v * size, label: label(v) })) };
 }
 
-function BandwidthChart({ points }) {
+// Labels at the right end of each line, nudged apart so they never overlap.
+function spreadLabels(items, minGap, top, bottom) {
+  const sorted = [...items].sort((a, b) => a.y - b.y);
+  for (let i = 1; i < sorted.length; i++) sorted[i].y = Math.max(sorted[i].y, sorted[i - 1].y + minGap);
+  const overflow = sorted.length ? sorted[sorted.length - 1].y - bottom : 0;
+  if (overflow > 0) sorted.forEach(s => { s.y = Math.max(top, s.y - overflow); });
+  return sorted;
+}
+
+function BandwidthChart({ points, apps, appsEnabled }) {
   const [ref, width] = useWidth();
   const [hover, setHover] = useState(null);
+  const [mode, setMode] = useState("total");
+  const byProgram = mode === "programs";
   // The newest second is still filling up, so the graph ends at the last full one.
-  const data = (points || []).slice(0, -1);
+  const totals = (points || []).slice(0, -1);
+  const appPoints = (apps?.points || []).slice(0, -1);
+  const series = byProgram
+    ? (apps?.apps || []).map((app, i) => ({ key: app, label: app, cls: `s${i + 1}`, values: appPoints.map(p => p.bytes[app] || 0) }))
+    : [{ key: "total", label: "All traffic", cls: "s-total", values: totals.map(d => d.bytes) }];
+  const times = byProgram ? appPoints.map(p => p.t) : totals.map(d => d.t);
+  const n = times.length;
   const H = 180;
-  const M = { top: 12, right: 14, bottom: 26, left: 70 };
+  const M = { top: 12, right: byProgram ? 132 : 14, bottom: 26, left: 70 };
   const innerW = Math.max(0, width - M.left - M.right);
   const innerH = H - M.top - M.bottom;
-  const scale = bandwidthScale(Math.max(0, ...data.map(d => d.bytes)));
-  const x = i => M.left + (data.length > 1 ? (i / (data.length - 1)) * innerW : 0);
+  const peak = Math.max(0, ...series.flatMap(s => s.values));
+  const scale = bandwidthScale(peak);
+  const x = i => M.left + (n > 1 ? (i / (n - 1)) * innerW : 0);
   const y = v => M.top + innerH - (v / scale.top) * innerH;
-  const line = data.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d.bytes).toFixed(1)}`).join("");
-  const area = data.length > 1 ? `${line}L${x(data.length - 1)},${y(0)}L${x(0)},${y(0)}Z` : "";
-  const peak = data.reduce((best, d) => (d.bytes > best ? d.bytes : best), 0);
-  const marks = [0, 15, 30, 45].map(ago => data.length - 1 - ago).filter(i => i >= 0);
-  const h = hover != null && data[hover] ? hover : null;
+  const path = values => values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const marks = [0, 15, 30, 45].map(ago => n - 1 - ago).filter(i => i >= 0);
+  const h = hover != null && hover < n ? hover : null;
+  const labels = byProgram && n
+    ? spreadLabels(series.map(s => ({ key: s.key, label: s.label, cls: s.cls, y: y(s.values[n - 1]) })), 13, M.top, M.top + innerH)
+    : [];
 
   function onPointer(e) {
-    if (!data.length || !innerW) return;
+    if (!n || !innerW) return;
     const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
-    const i = Math.round(((px - M.left) / innerW) * (data.length - 1));
-    setHover(Math.max(0, Math.min(data.length - 1, i)));
+    const i = Math.round(((px - M.left) / innerW) * (n - 1));
+    setHover(Math.max(0, Math.min(n - 1, i)));
   }
   function onKey(e) {
-    if (!data.length) return;
-    if (e.key === "ArrowLeft") setHover(i => Math.max(0, (i ?? data.length) - 1));
-    else if (e.key === "ArrowRight") setHover(i => Math.min(data.length - 1, (i ?? -1) + 1));
+    if (!n) return;
+    if (e.key === "ArrowLeft") setHover(i => Math.max(0, (i ?? n) - 1));
+    else if (e.key === "ArrowRight") setHover(i => Math.min(n - 1, (i ?? -1) + 1));
     else if (e.key === "Escape") setHover(null);
     else return;
     e.preventDefault();
   }
+
+  const empty = byProgram
+    ? (appsEnabled === false ? "Programs are named during live capture only" : "No program traffic in the last minute")
+    : "No traffic in the last minute";
 
   return (
     <div className="card chart-card">
       <div className="card-head">
         <div>
           <div className="label">Bandwidth</div>
-          <div className="muted">Bytes per second over the last minute</div>
+          <div className="muted">Bytes per second over the last minute{byProgram ? ", busiest programs" : ""}</div>
         </div>
-        <div className="muted">peak {formatBytes(peak)}/s</div>
+        <div className="chart-head-right">
+          <span className="muted">peak {formatBytes(peak)}/s</span>
+          <div className="seg small" role="group" aria-label="What to show">
+            {[["total", "Total"], ["programs", "By program"]].map(([key, text]) => (
+              <button key={key} className={mode === key ? "on" : ""} aria-pressed={mode === key}
+                onClick={() => { setMode(key); setHover(null); }}>{text}</button>
+            ))}
+          </div>
+        </div>
       </div>
       <div
         className="chart"
@@ -312,7 +343,7 @@ function BandwidthChart({ points }) {
         aria-label="Bandwidth over the last minute. Use the arrow keys to read each second."
         onPointerMove={onPointer}
         onPointerLeave={() => setHover(null)}
-        onFocus={() => setHover(i => i ?? data.length - 1)}
+        onFocus={() => setHover(i => i ?? n - 1)}
         onBlur={() => setHover(null)}
         onKeyDown={onKey}
       >
@@ -325,41 +356,63 @@ function BandwidthChart({ points }) {
               </g>
             ))}
             {marks.map(i => (
-              <text key={i} className="axis" x={x(i)} y={H - 6} textAnchor={i === data.length - 1 ? "end" : "middle"}>
-                {i === data.length - 1 ? "now" : `${data.length - 1 - i} s ago`}
+              <text key={i} className="axis" x={x(i)} y={H - 6} textAnchor={i === n - 1 ? "end" : "middle"}>
+                {i === n - 1 ? "now" : `${n - 1 - i} s ago`}
               </text>
             ))}
-            <path className="area" d={area} />
-            <path className="line" d={line} />
+            {!byProgram && n > 1 && (
+              <path className="area" d={`${path(series[0].values)}L${x(n - 1)},${y(0)}L${x(0)},${y(0)}Z`} />
+            )}
+            {series.map(s => <path key={s.key} className={`line ${s.cls}`} d={path(s.values)} />)}
+            {labels.map(l => (
+              <text key={l.key} className="end-label" x={x(n - 1) + 10} y={l.y} dy="0.32em">
+                {l.label.length > 16 ? `${l.label.slice(0, 15)}…` : l.label}
+              </text>
+            ))}
             {h != null && (
               <g>
                 <line className="crosshair" x1={x(h)} x2={x(h)} y1={M.top} y2={M.top + innerH} />
-                <circle className="dot" cx={x(h)} cy={y(data[h].bytes)} r="4.5" />
+                {series.map(s => <circle key={s.key} className={`dot ${s.cls}`} cx={x(h)} cy={y(s.values[h])} r="4.5" />)}
               </g>
             )}
           </svg>
         )}
-        {width > 0 && peak === 0 && <div className="chart-empty">No traffic in the last minute</div>}
+        {width > 0 && peak === 0 && <div className="chart-empty">{empty}</div>}
         {h != null && (
           <div
             className="tooltip"
-            style={{ left: Math.min(Math.max(x(h), 90), width - 90), top: Math.max(y(data[h].bytes) - 64, 0) }}
+            style={{ left: Math.min(Math.max(x(h), 110), width - 110), top: 0 }}
           >
-            <b>{formatBytes(data[h].bytes)}/s</b>
-            <span>{data[h].packets.toLocaleString()} packets &middot; {formatTime(data[h].t)}</span>
+            {series.map(s => (
+              <span key={s.key} className="tip-row">
+                <i className={`key ${s.cls}`} aria-hidden="true" />
+                <b>{formatBytes(s.values[h])}/s</b>
+                {byProgram && <em>{s.label}</em>}
+              </span>
+            ))}
+            <span>
+              {!byProgram && `${totals[h]?.packets.toLocaleString()} packets · `}{formatTime(times[h])}
+            </span>
           </div>
         )}
         {/* For screen readers. A table ignores the 1px size, so a div does the hiding. */}
         <div className="sr-only">
           <table>
-            <caption>Bytes and packets per second, last minute</caption>
-            <thead><tr><th>Time</th><th>Bytes</th><th>Packets</th></tr></thead>
+            <caption>Bytes per second, last minute</caption>
+            <thead><tr><th>Time</th>{series.map(s => <th key={s.key}>{s.label}</th>)}</tr></thead>
             <tbody>
-              {data.map(d => <tr key={d.t}><td>{formatTime(d.t)}</td><td>{d.bytes}</td><td>{d.packets}</td></tr>)}
+              {times.map((t, i) => <tr key={t}><td>{formatTime(t)}</td>{series.map(s => <td key={s.key}>{s.values[i]}</td>)}</tr>)}
             </tbody>
           </table>
         </div>
       </div>
+      {byProgram && series.length > 0 && (
+        <div className="chart-legend">
+          {series.map(s => (
+            <span key={s.key}><i className={`key ${s.cls}`} aria-hidden="true" />{s.label}</span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -480,6 +533,8 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
         <div className="head-buttons">
           <a className="button" href={`/api/export/packets.csv?${filterQuery(filters)}`} download
             title="Download the packets shown (with the current filters) as a spreadsheet">Export CSV</a>
+          <a className="button" href={`/api/export/packets.pcap?${filterQuery(filters)}`} download
+            title="Download the packets shown as a .pcap file, to open in Wireshark">Export .pcap</a>
           <button className={paused ? "paused" : ""} onClick={() => setPaused(!paused)}>
           {paused ? "Resume" : "Pause"}
           </button>
@@ -511,7 +566,7 @@ function PacketTable({ packets, paused, setPaused, selectedId, onSelect, filters
               {rows.map(p => (
                 <tr
                   key={p.id}
-                  className={p.id === selectedId ? "selected" : ""}
+                  className={[p.id === selectedId ? "selected" : "", p.tcp_note ? "noted" : ""].join(" ").trim()}
                   onClick={() => onSelect(p)}
                 >
                   <td className="time">{formatTime(p.time)}</td>
@@ -801,10 +856,102 @@ function TopHosts({ hosts, retention, onPick }) {
   );
 }
 
+// ---- small helpers for settings remembered in this browser ----------------------------
+
+function readSetting(key, fallback) {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : JSON.parse(value);
+  } catch (err) {
+    return fallback;
+  }
+}
+
+function useSetting(key, fallback) {
+  const [value, setValue] = useState(() => readSetting(key, fallback));
+  useEffect(() => {
+    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (err) { /* private window */ }
+  }, [key, value]);
+  return [value, setValue];
+}
+
+// Poll one API address every few seconds while a view is on screen.
+function useFetch(url, everyMs) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let stopped = false;
+    async function load() {
+      try {
+        const body = await getJSON(url);
+        if (!stopped) { setData(body); setError(null); }
+      } catch (err) {
+        if (err.status === 401) window.location.reload();
+        else if (!stopped) setError(err.message);
+      }
+    }
+    load();
+    const timer = everyMs ? setInterval(load, everyMs) : null;
+    return () => { stopped = true; if (timer) clearInterval(timer); };
+  }, [url, everyMs]);
+  return { data, error };
+}
+
+// ---- packet details, with the bytes ----------------------------------------------------
+
+const APP_LAYER = /^(DNS|DHCP|HTTP|TLS)\b/;
+
+function HexView({ packetId }) {
+  const { data, error } = useFetch(`/api/packets/${packetId}/bytes`, 0);
+  if (error) return <div className="muted">{error}</div>;
+  if (!data) return <div className="muted">Loading bytes&hellip;</div>;
+  const bytes = data.hex.match(/../g) || [];
+  const layerOf = i => data.layers.findIndex(l => i >= l.start && i < l.end);
+  const rows = [];
+  for (let offset = 0; offset < bytes.length; offset += 16) rows.push(offset);
+  return (
+    <div className="hexview">
+      <div className="hex-legend">
+        {data.layers.map((l, i) => (
+          <span key={i} className={`hx l${i % 6}`}>{l.name} <small>{l.end - l.start} B</small></span>
+        ))}
+      </div>
+      <div className="hex-rows" role="table" aria-label="Packet bytes">
+        {rows.map(offset => (
+          <div className="hex-row" role="row" key={offset}>
+            <span className="off">{offset.toString(16).padStart(4, "0")}</span>
+            <span className="bytes">
+              {bytes.slice(offset, offset + 16).map((b, j) => (
+                <span key={j} className={`hx l${layerOf(offset + j) % 6}`}>{b}</span>
+              ))}
+            </span>
+            <span className="ascii">
+              {bytes.slice(offset, offset + 16).map((b, j) => {
+                const code = parseInt(b, 16);
+                return <span key={j} className={`hx l${layerOf(offset + j) % 6}`}>{code > 31 && code < 127 ? String.fromCharCode(code) : "."}</span>;
+              })}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PacketDetails({ packet }) {
+  const [showBytes, setShowBytes] = useState(false);
+  useEffect(() => setShowBytes(false), [packet?.id]);
   return (
     <div className="card">
-      <div className="card-head"><div className="label">Packet details</div>{packet && <div className="muted">#{packet.id}</div>}</div>
+      <div className="card-head">
+        <div className="label">Packet details</div>
+        {packet && (
+          <div className="head-buttons">
+            <span className="muted">#{packet.id}</span>
+            <button onClick={() => setShowBytes(s => !s)} aria-expanded={showBytes}>{showBytes ? "Hide bytes" : "Show bytes"}</button>
+          </div>
+        )}
+      </div>
       {!packet && <div className="muted">Click a packet to see its headers decoded layer by layer.</div>}
       {packet && (
         <div>
@@ -812,6 +959,12 @@ function PacketDetails({ packet }) {
             <div className="layer l-app">
               <div className="name">PROGRAM</div>
               <div className="body">{packet.app}<br /><span>sent or received by this program on this computer</span></div>
+            </div>
+          )}
+          {APP_LAYER.test(packet.info) && (
+            <div className="layer l-application">
+              <div className="name">{packet.info.split(" ")[0]}</div>
+              <div className="body">{packet.info.split(" ").slice(1).join(" ")}</div>
             </div>
           )}
           {packet.src_mac && (
@@ -829,7 +982,8 @@ function PacketDetails({ packet }) {
             <div className="layer l-net">
               <div className="name">IPv{packet.ip_version}</div>
               <div className="body">
-                <span>src</span> {packet.src}<br /><span>dst</span> {packet.dst}<br />
+                <span>src</span> {packet.src}{packet.src_name ? ` (${packet.src_name})` : ""}<br />
+                <span>dst</span> {packet.dst}{packet.dst_name ? ` (${packet.dst_name})` : ""}<br />
                 <span>{packet.ip_version === 6 ? "hop limit" : "ttl"}</span> {packet.ttl}
               </div>
             </div>
@@ -840,6 +994,9 @@ function PacketDetails({ packet }) {
               <div className="body">
                 {packet.sport != null && <><span>ports</span> {packet.sport} &rarr; {packet.dport}<br /></>}
                 {packet.flags.length > 0 && <><span>flags</span> {packet.flags.join(", ")}<br /></>}
+                {packet.seq != null && <><span>seq</span> {packet.seq} <span>ack</span> {packet.ack}<br /></>}
+                {packet.payload_len > 0 && <><span>data</span> {packet.payload_len} bytes<br /></>}
+                {packet.tcp_note && <><span>note</span> <b className="note">{packet.tcp_note}</b><br /></>}
                 {packet.service && <><span>service</span> {packet.service}<br /></>}
                 {packet.proto === "ICMP" && <><span>type</span> {packet.info}</>}
               </div>
@@ -849,8 +1006,319 @@ function PacketDetails({ packet }) {
             <div className="name">FRAME</div>
             <div className="body"><span>size</span> {packet.length} bytes<br /><span>time</span> {formatTime(packet.time)}</div>
           </div>
+          {showBytes && <HexView packetId={packet.id} />}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- the other views: connections, devices, history -------------------------------------
+
+function ViewTabs({ view, setView }) {
+  const views = [["packets", "Packets"], ["connections", "Connections"], ["devices", "Devices"], ["history", "History"]];
+  return (
+    <div className="view-tabs" role="tablist" aria-label="Views">
+      {views.map(([key, text]) => (
+        <button key={key} role="tab" aria-selected={view === key} className={view === key ? "on" : ""}
+          onClick={() => setView(key)}>{text}</button>
+      ))}
+    </div>
+  );
+}
+
+function Tiles({ items }) {
+  return (
+    <div className="summary">
+      {items.map(item => (
+        <div className="metric" key={item.label}>
+          <div className="label">{item.label}</div>
+          <div className="value">{item.value}</div>
+          <div className="sub">{item.sub}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const STATE_CLASS = { established: "good", "SYN sent": "wait", "SYN received": "wait", closing: "wait",
+                      closed: "done", reset: "bad", active: "good", "joined late": "done" };
+
+function ConnectionsView({ onFocus }) {
+  const { data } = useFetch("/api/connections?limit=500", 2000);
+  const [query, setQuery] = useState("");
+  const all = data?.connections || [];
+  const q = query.trim().toLowerCase();
+  const rows = q ? all.filter(c => [c.client, c.server, c.server_name, c.app, c.state, c.proto, c.service]
+    .some(v => v && String(v).toLowerCase().includes(q))) : all;
+  const s = data?.summary || {};
+  return (
+    <>
+      <Tiles items={[
+        { label: "Connections", value: (s.connections ?? 0).toLocaleString(), sub: `${s.tcp ?? 0} TCP · ${s.udp ?? 0} UDP` },
+        { label: "Average round trip", value: s.avg_rtt_ms != null ? `${s.avg_rtt_ms} ms` : "-", sub: "SYN to SYN-ACK" },
+        { label: "Retransmissions", value: `${s.retransmission_percent ?? 0}%`, sub: "of TCP packets sent again" },
+        { label: "Duplicate ACKs", value: (s.dup_acks ?? 0).toLocaleString(), sub: "receivers asking for lost data" },
+      ]} />
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="label">Connections</div>
+            <div className="muted">Newest activity first &middot; click one to see its packets</div>
+          </div>
+          <input className="search" placeholder="Search connections" value={query} onChange={e => setQuery(e.target.value)}
+            aria-label="Search connections" />
+        </div>
+        <div className="table-wrap tall">
+          <table>
+            <thead>
+              <tr>
+                <th>LAST SEEN</th><th>APP</th><th>CLIENT</th><th>SERVER</th><th>PROTO</th><th>STATE</th>
+                <th className="num">ROUND TRIP</th><th className="num">SENT</th><th className="num">RECEIVED</th>
+                <th className="num">RETRANS.</th><th className="num">DURATION</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(c => (
+                <tr key={c.id} onClick={() => onFocus(c.server)} title="Show this connection's packets">
+                  <td className="time">{formatTime(c.last_seen)}</td>
+                  <td className="program">{c.app || <span className="none">&mdash;</span>}</td>
+                  <td>{withPort(c.client, c.client_port)}</td>
+                  <td>{withPort(c.server, c.server_port)}{c.server_name && <span className="hostname">{c.server_name}</span>}</td>
+                  <td><span className={`badge p-${protoClass(c.proto)}`}>{c.proto}</span></td>
+                  <td><span className={`state ${STATE_CLASS[c.state] || ""}`}>{c.state}</span></td>
+                  <td className="num">{c.rtt_ms != null ? `${c.rtt_ms} ms` : "-"}</td>
+                  <td className="num">{formatBytes(c.bytes_out)}</td>
+                  <td className="num">{formatBytes(c.bytes_in)}</td>
+                  <td className="num">{c.retransmissions || ""}</td>
+                  <td className="num">{formatDuration(c.duration)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!rows.length && <div className="empty">{q ? "No connections match." : "No connections yet."}</div>}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function DevicesView({ onFocus }) {
+  const { data } = useFetch("/api/devices", 3000);
+  const devices = data?.devices || [];
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="label">Devices on this network</div>
+          <div className="muted">Seen in their own traffic &middot; maker from the MAC address &middot; name from DHCP</div>
+        </div>
+        <span className="muted">{devices.length} found</span>
+      </div>
+      <div className="devices">
+        {devices.map(d => (
+          <button className="device" key={d.mac} onClick={() => onFocus(d.mac)} title="Show this device's packets">
+            <span className="device-name">
+              {d.name || d.maker || "Unknown device"}
+              {d.is_this_computer && <span className="tag">THIS COMPUTER</span>}
+              {d.is_router && <span className="tag">ROUTER</span>}
+            </span>
+            <span className="muted">{d.name ? d.maker || "unknown maker" : ""}</span>
+            <span className="mono">{d.addresses.join(", ") || "no address seen"}</span>
+            <span className="mono muted">{d.mac}</span>
+            <span className="muted">{d.packets.toLocaleString()} packets &middot; {formatBytes(d.bytes)} &middot; last {formatTime(d.last_seen)}</span>
+          </button>
+        ))}
+        {!devices.length && <div className="muted">No devices seen yet.</div>}
+      </div>
+    </div>
+  );
+}
+
+function HistoryView() {
+  const [hours, setHours] = useState(24);
+  const { data, error } = useFetch(`/api/history?hours=${hours}`, 10000);
+  if (data && !data.enabled) {
+    return <div className="card"><div className="muted">History is off. Start without --no-history to keep it.</div></div>;
+  }
+  const maxServer = Math.max(1, ...(data?.top_servers || []).map(s => s.bytes_in + s.bytes_out));
+  return (
+    <>
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="label">History</div>
+            <div className="muted">
+              Kept between runs for {data?.keep_days ?? 7} days{data?.path ? ` in ${data.path}` : ""}
+              {error ? ` · ${error}` : ""}{data?.error ? ` · ${data.error}` : ""}
+            </div>
+          </div>
+          <div className="seg small" role="group" aria-label="Time range">
+            {[[1, "1 hour"], [6, "6 hours"], [24, "24 hours"], [168, "7 days"]].map(([h, text]) => (
+              <button key={h} className={hours === h ? "on" : ""} aria-pressed={hours === h} onClick={() => setHours(h)}>{text}</button>
+            ))}
+          </div>
+        </div>
+        <div className="history-grid">
+          <div>
+            <div className="label sub-label">Sessions</div>
+            {(data?.sessions || []).map(s => (
+              <div className="history-row" key={s.id}>
+                <span>{s.mode === "replay" ? "Replay" : "Live"} &middot; {String(s.source).split(/[\\/]/).pop()}</span>
+                <span className="muted">{formatTime(s.started)} &ndash; {formatTime(s.ended)} &middot; {(s.packets || 0).toLocaleString()} packets &middot; {formatBytes(s.bytes)}</span>
+              </div>
+            ))}
+            {!data?.sessions?.length && <div className="muted">No sessions in this time.</div>}
+          </div>
+          <div>
+            <div className="label sub-label">Busiest servers</div>
+            {(data?.top_servers || []).map(s => (
+              <div className="host" key={s.server}>
+                <span className="name">{s.server}{s.name && <small>{s.name}</small>}</span>
+                <span className="bar"><div style={{ width: `${(100 * (s.bytes_in + s.bytes_out)) / maxServer}%` }} /></span>
+                <span className="size">{formatBytes(s.bytes_in + s.bytes_out)}</span>
+              </div>
+            ))}
+            {!data?.top_servers?.length && <div className="muted">No connections in this time.</div>}
+          </div>
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-head"><div className="label">Alerts in this time</div></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>LAST SEEN</th><th>SEVERITY</th><th>ALERT</th><th className="num">TIMES</th></tr></thead>
+            <tbody>
+              {(data?.alerts || []).map((a, i) => (
+                <tr key={`${a.session}-${i}`}>
+                  <td className="time">{formatTime(a.last_seen)}</td>
+                  <td><span className={`sev s-${a.severity}`}>{SEVERITY_LABEL[a.severity]}</span></td>
+                  <td className="wrap"><b>{a.title}</b><span className="hostname">{a.detail}</span></td>
+                  <td className="num">{a.count.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!data?.alerts?.length && <div className="empty">No alerts in this time.</div>}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ---- top bar: settings, theme, text size, alerts, report ---------------------------------
+
+function SettingsPanel({ onClose, refresh }) {
+  const { data } = useFetch("/api/interfaces", 0);
+  const [iface, setIface] = useState(null);
+  const [filter, setFilter] = useState(null);
+  const [message, setMessage] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const chosen = iface ?? data?.current ?? "";
+  const bpf = filter ?? data?.filter ?? "";
+  const live = data?.mode === "live";
+
+  async function apply() {
+    setBusy(true);
+    const result = await postJSON("/api/capture/start", { iface: chosen, filter: bpf });
+    setBusy(false);
+    setMessage({ ok: result.ok, text: result.ok ? "Capture restarted with these settings." : result.message });
+    if (result.ok) refresh();
+  }
+
+  return (
+    <div className="popover" role="dialog" aria-label="Capture settings">
+      <div className="card-head">
+        <div className="label">Capture settings</div>
+        <button className="link" onClick={onClose}>Close</button>
+      </div>
+      {!live && data && <p className="muted">Replaying a file: interface and filter apply to live capture only.</p>}
+      <label className="field-label" htmlFor="iface">Interface</label>
+      <select id="iface" value={chosen} disabled={!live} onChange={e => setIface(e.target.value)}>
+        {(data?.interfaces || []).map(i => (
+          <option key={i.name} value={i.name}>{i.name}{i.ips.length ? ` (${i.ips[0]})` : ""}{i.default ? " · default" : ""}</option>
+        ))}
+      </select>
+      <label className="field-label" htmlFor="bpf">Capture filter (BPF)</label>
+      <input id="bpf" className="mono-input" value={bpf} disabled={!live} placeholder="e.g. tcp port 443, or host 192.168.1.5"
+        onChange={e => setFilter(e.target.value)} />
+      <p className="muted">Only matching packets are captured at all. Leave empty to capture everything.</p>
+      {message && <div className={`fix-message ${message.ok ? "good" : "bad"}`}>{message.text}</div>}
+      <button className="primary" disabled={!live || busy} onClick={apply}>{busy ? "Restarting…" : "Apply and restart capture"}</button>
+    </div>
+  );
+}
+
+const THEMES = ["auto", "light", "dark"];
+
+function useAppearance() {
+  const [theme, setTheme] = useSetting("sniffer.theme", "auto");
+  const [large, setLarge] = useSetting("sniffer.large", false);
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "auto") delete root.dataset.theme; else root.dataset.theme = theme;
+    if (large) root.dataset.size = "large"; else delete root.dataset.size;
+  }, [theme, large]);
+  return { theme, cycleTheme: () => setTheme(t => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length]), large, setLarge };
+}
+
+// A desktop pop-up and a short sound for every new high-severity alert, if turned on.
+function useAlertNotifications(security, enabled) {
+  const seen = useRef(null);
+  useEffect(() => {
+    const high = (security?.alerts || []).filter(a => a.severity === "high");
+    if (seen.current === null) {           // first load: only alerts after this count
+      if (security) seen.current = new Set(high.map(a => a.id));
+      return;
+    }
+    const fresh = high.filter(a => !seen.current.has(a.id));
+    fresh.forEach(a => seen.current.add(a.id));
+    if (!enabled || !fresh.length) return;
+    try {
+      const audio = new (window.AudioContext || window.webkitAudioContext)();
+      const tone = audio.createOscillator();
+      const gain = audio.createGain();
+      tone.frequency.value = 880;
+      gain.gain.setValueAtTime(0.15, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.4);
+      tone.connect(gain).connect(audio.destination);
+      tone.start();
+      tone.stop(audio.currentTime + 0.4);
+    } catch (err) { /* no sound available */ }
+    if ("Notification" in window && Notification.permission === "granted") {
+      fresh.forEach(a => new Notification(`Security alert: ${a.title}`, { body: a.detail, tag: `alert-${a.id}` }));
+    }
+  }, [security, enabled]);
+}
+
+function TopbarTools({ capture, refresh, notify, setNotify }) {
+  const { theme, cycleTheme, large, setLarge } = useAppearance();
+  const [settings, setSettings] = useState(false);
+
+  async function toggleNotify() {
+    if (!notify && "Notification" in window && Notification.permission === "default") {
+      try { await Notification.requestPermission(); } catch (err) { /* older browsers */ }
+    }
+    setNotify(!notify);
+  }
+
+  return (
+    <div className="tools">
+      <button className="tool" onClick={() => setSettings(s => !s)} aria-expanded={settings} title="Interface and capture filter">
+        Settings
+      </button>
+      <button className="tool" onClick={toggleNotify} aria-pressed={notify}
+        title={notify ? "Pop-up and sound for high-severity alerts: on" : "Pop-up and sound for high-severity alerts: off"}>
+        Alerts: {notify ? "on" : "off"}
+      </button>
+      <button className="tool" onClick={cycleTheme} title="Light, dark, or follow the computer">
+        Theme: {theme}
+      </button>
+      <button className="tool" onClick={() => setLarge(!large)} aria-pressed={large} title="Larger text, for projectors">
+        {large ? "Normal text" : "Large text"}
+      </button>
+      <a className="tool" href="/report" target="_blank" rel="noopener">Report</a>
+      {settings && <SettingsPanel onClose={() => setSettings(false)} refresh={refresh} capture={capture} />}
     </div>
   );
 }
@@ -859,6 +1327,9 @@ function App() {
   const [filters, setFilters] = useState(NO_FILTERS);
   const { packets, stats, security, offline, paused, setPaused, filterError, refresh } = usePolling(filters);
   const [selected, setSelected] = useState(null);
+  const [view, setView] = useSetting("sniffer.view", "packets");
+  const [notify, setNotify] = useSetting("sniffer.notify", false);
+  useAlertNotifications(security, notify);
 
   const capture = stats?.capture;
   const retention = stats?.retention;
@@ -867,8 +1338,11 @@ function App() {
   function focusHost(host) {
     if (!host) return;
     setFilters({ ...NO_FILTERS, host });
-    const table = document.getElementById("packets");
-    if (table && table.getBoundingClientRect().top < 0) table.scrollIntoView({ behavior: "smooth" });
+    setView("packets");
+    setTimeout(() => {
+      const table = document.getElementById("packets");
+      if (table && table.getBoundingClientRect().top < 0) table.scrollIntoView({ behavior: "smooth" });
+    }, 0);
   }
 
   return (
@@ -884,46 +1358,56 @@ function App() {
           {!offline && <CaptureButton capture={capture} refresh={refresh} />}
         </div>
       </div>
+      <div className="topbar-inner tools-row">
+        <ViewTabs view={view} setView={setView} />
+        <TopbarTools capture={capture} refresh={refresh} notify={notify} setNotify={setNotify} />
+      </div>
     </header>
     <div className="app">
       <Banners capture={capture} security={security} onFocus={focusHost} />
 
-      <Summary stats={stats} />
-      <BandwidthChart points={stats?.bandwidth} />
-
-      <div className="grid">
-        <PacketTable
-          packets={packets}
-          paused={paused}
-          setPaused={setPaused}
-          selectedId={selected?.id}
-          onSelect={setSelected}
-          filters={filters}
-          setFilters={setFilters}
-          filterError={filterError}
-          retention={retention}
-          capturing={capture?.running ?? true}
-        />
-        <div className="side">
-          {/* First, so a clicked packet's headers are always on screen */}
-          <PacketDetails packet={selected} />
-          <SecurityPanel security={security} onFocus={focusHost} refresh={refresh} />
-          <Protocols
-            protocols={stats?.protocols}
-            retention={retention}
-            picked={filters.proto}
-            onPick={proto => setFilters(f => ({ ...f, proto }))}
-          />
-          <TopApps
-            apps={stats?.top_apps}
-            retention={retention}
-            enabled={capture?.apps}
-            picked={filters.q}
-            onPick={app => setFilters({ ...NO_FILTERS, q: app })}
-          />
-          <TopHosts hosts={stats?.top_hosts} retention={retention} onPick={focusHost} />
-        </div>
-      </div>
+      {view === "packets" && (
+        <>
+          <Summary stats={stats} />
+          <BandwidthChart points={stats?.bandwidth} apps={stats?.app_bandwidth} appsEnabled={capture?.apps} />
+          <div className="grid">
+            <PacketTable
+              packets={packets}
+              paused={paused}
+              setPaused={setPaused}
+              selectedId={selected?.id}
+              onSelect={setSelected}
+              filters={filters}
+              setFilters={setFilters}
+              filterError={filterError}
+              retention={retention}
+              capturing={capture?.running ?? true}
+            />
+            <div className="side">
+              {/* First, so a clicked packet's headers are always on screen */}
+              <PacketDetails packet={selected} />
+              <SecurityPanel security={security} onFocus={focusHost} refresh={refresh} />
+              <Protocols
+                protocols={stats?.protocols}
+                retention={retention}
+                picked={filters.proto}
+                onPick={proto => setFilters(f => ({ ...f, proto }))}
+              />
+              <TopApps
+                apps={stats?.top_apps}
+                retention={retention}
+                enabled={capture?.apps}
+                picked={filters.q}
+                onPick={app => setFilters({ ...NO_FILTERS, q: app })}
+              />
+              <TopHosts hosts={stats?.top_hosts} retention={retention} onPick={focusHost} />
+            </div>
+          </div>
+        </>
+      )}
+      {view === "connections" && <ConnectionsView onFocus={focusHost} />}
+      {view === "devices" && <DevicesView onFocus={focusHost} />}
+      {view === "history" && <HistoryView />}
       <footer className="footer">
         Packet Sniffer {stats?.version || ""} &middot; team Big Packet &middot; capture only on your own device and network
       </footer>
