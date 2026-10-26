@@ -6,8 +6,10 @@ Decoding follows the layers of the packet, outermost first:
                ARP       -> who-has / is-at between IPs
     Transport  TCP/UDP   -> ports, TCP flags
                ICMP      -> type (echo request, reply, ...)
+    Application DNS      -> the name asked for, and the addresses answered
 """
 
+from scapy.layers.dns import DNS
 from scapy.layers.inet import ICMP, IP, TCP, UDP
 from scapy.layers.inet6 import IPv6
 from scapy.layers.l2 import ARP, Ether
@@ -28,6 +30,8 @@ TCP_FLAG_NAMES = [
     ("P", "PSH"), ("A", "ACK"), ("U", "URG"),
 ]
 
+DNS_TYPES = {1: "A", 5: "CNAME", 12: "PTR", 15: "MX", 16: "TXT", 28: "AAAA", 33: "SRV", 65: "HTTPS"}
+
 ICMP_TYPES = {
     0: "Echo reply", 3: "Destination unreachable", 5: "Redirect",
     8: "Echo request", 11: "Time exceeded",
@@ -40,6 +44,23 @@ def service_for(sport, dport):
         if port in SERVICES:
             return SERVICES[port]
     return None
+
+
+def dns_info(dns):
+    """'DNS query A example.com' or 'DNS answer example.com = 93.184.215.14'."""
+    from .names import label, records
+
+    questions = records(dns.qd)
+    if not questions:
+        return "DNS"
+    asked = label(questions[0].qname)
+    if not dns.qr:
+        return f"DNS query {DNS_TYPES.get(questions[0].qtype, questions[0].qtype)} {asked}"
+    addresses = [str(a.rdata) for a in records(dns.an) if getattr(a, "type", None) in (1, 28)]
+    if not addresses:
+        return f"DNS answer {asked}" + (" (not found)" if dns.rcode == 3 else "")
+    more = f" +{len(addresses) - 2} more" if len(addresses) > 2 else ""
+    return f"DNS answer {asked} = {', '.join(addresses[:2])}{more}"
 
 
 def tcp_payload(pkt):
@@ -76,6 +97,8 @@ def parse_packet(pkt, timestamp=None):
         "arp_op": None,     # 1 = request ("who has"), 2 = reply ("is at")
         "arp_mac": None,    # MAC the ARP sender claims for its IP
         "app": None,        # program on this computer, filled in during live capture
+        "src_name": None,   # names learned from DNS answers, filled in during capture
+        "dst_name": None,
         "info": "",
     }
 
@@ -120,6 +143,11 @@ def parse_packet(pkt, timestamp=None):
         udp = pkt[UDP]
         record.update(proto="UDP", sport=udp.sport, dport=udp.dport)
         record["info"] = f"{udp.sport} -> {udp.dport}"
+        if DNS in pkt:
+            try:
+                record["info"] = dns_info(pkt[DNS])
+            except Exception:   # a malformed DNS message keeps the plain port info
+                pass
     elif ICMP in pkt:
         icmp_type = pkt[ICMP].type
         record.update(proto="ICMP", icmp_type=icmp_type)
