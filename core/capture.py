@@ -9,7 +9,10 @@ makes the capture thread miss packets. If the queue ever fills up the packet
 is counted as dropped instead of blocking capture.
 
 Capture can stop by itself after ``limit_packets`` packets or
-``limit_seconds`` seconds, so it does not keep collecting forever.
+``limit_seconds`` seconds, so it does not keep collecting forever, and it can
+be stopped and started again from the dashboard. Each run has its own stop
+signal, so a stopped run that is still finishing can never carry on into the
+next one.
 """
 
 import queue
@@ -46,18 +49,20 @@ def capture_problem():
 
 class PacketPipeline:
     def __init__(self, store, queue_size=10000, on_record=None, monitor=None, recorder=None,
-                 limit_packets=None, limit_seconds=None, processes=None):
+                 limit_packets=None, limit_seconds=None, processes=None, names=None):
         self.store = store
         self.on_record = on_record  # optional callback, e.g. print each packet
         self.monitor = monitor      # optional SecurityMonitor, sees every record
         self.recorder = recorder    # optional RotatingPcapWriter, saves every packet
         self.processes = processes  # optional ProcessMap, names the program behind each packet
+        self.names = names          # optional NameCache, names addresses from DNS answers
         self.limit_packets = limit_packets
         self.limit_seconds = limit_seconds
         self.queue = queue.Queue(maxsize=queue_size)
         self._stop = threading.Event()
         self._threads = []
         self._timer = None
+        self._last_start = None     # how capture was last started, to start it again
         self._lock = threading.Lock()
         self._status = {
             "mode": None,       # "live" or "replay"
@@ -105,8 +110,8 @@ class PacketPipeline:
             self._stop.set()
 
     # Consumer side: decode the packet and update the statistics.
-    def _consume(self):
-        while not (self._stop.is_set() and self.queue.empty()):
+    def _consume(self, stop):
+        while not (stop.is_set() and self.queue.empty()):
             try:
                 pkt, timestamp = self.queue.get(timeout=0.2)
             except queue.Empty:
@@ -115,6 +120,11 @@ class PacketPipeline:
                 record = parse_packet(pkt, timestamp)
                 if self.processes:
                     record["app"] = self.processes.lookup(record)
+                if self.names is not None:   # (an empty cache is falsy)
+                    if record["proto"] == "UDP" and record["info"].startswith("DNS answer"):
+                        self.names.learn(pkt)
+                    record["src_name"] = self.names.name(record["src"])
+                    record["dst_name"] = self.names.name(record["dst"])
                 record = self.store.add(record)
             except Exception:
                 self._count("parse_errors")
@@ -129,9 +139,9 @@ class PacketPipeline:
                 self.on_record(record)
 
     def _start(self, target, *args):
-        self._stop.clear()
+        stop = self._stop = threading.Event()
         self._set(running=True, error=None, stopped=None)
-        for fn, fn_args in ((self._consume, ()), (target, args)):
+        for fn, fn_args in ((self._consume, (stop,)), (target, (*args, stop))):
             thread = threading.Thread(target=fn, args=fn_args, daemon=True)
             thread.start()
             self._threads.append(thread)
@@ -141,6 +151,7 @@ class PacketPipeline:
             self._timer.start()
 
     def start_live(self, iface=None, bpf_filter=None):
+        self._last_start = (self.start_live, iface, bpf_filter)
         self._set(mode="live", source=interface_name(iface), filter=bpf_filter)
         problem = capture_problem()
         if problem:
@@ -155,8 +166,27 @@ class PacketPipeline:
         second) and each packet is stamped with the current time, so the
         dashboard behaves the same as with live capture.
         """
+        self._last_start = (self.start_replay, path, speed, loop)
         self._set(mode="replay", source=path, filter=None)
         self._start(self._replay, path, speed, loop)
+
+    def stop_from_dashboard(self):
+        if self.status()["running"]:
+            self._set(stopped="stopped from the dashboard")
+            self.stop()
+
+    def restart(self):
+        """Start capturing again the way it was last started; False if it is already running."""
+        if self.status()["running"] or self._last_start is None:
+            return False
+        self.stop()
+        with self._lock:
+            self._status["captured"] = 0
+        if self.recorder:
+            self.recorder.reopen()
+        start, *args = self._last_start
+        start(*args)
+        return True
 
     def stop(self, timeout=2):
         self._stop.set()
@@ -169,7 +199,7 @@ class PacketPipeline:
             self.recorder.close()
         self._set(running=False)
 
-    def _sniff_live(self, iface, bpf_filter):
+    def _sniff_live(self, iface, bpf_filter, stop):
         from scapy.sendrecv import sniff
 
         try:
@@ -178,7 +208,7 @@ class PacketPipeline:
                 filter=bpf_filter,
                 prn=self._enqueue,
                 store=False,
-                stop_filter=lambda _pkt: self._stop.is_set(),
+                stop_filter=lambda _pkt: stop.is_set(),
                 # Also wakes sniff up at the time limit on a quiet network
                 timeout=self.limit_seconds,
             )
@@ -187,22 +217,26 @@ class PacketPipeline:
         except Exception as exc:
             self._set(error=f"Capture stopped: {exc}")
         finally:
+            self._ended(stop)
+
+    def _ended(self, stop):
+        if stop is self._stop:   # not an older run that was still finishing
             self._set(running=False)
 
-    def _replay(self, path, speed, loop):
+    def _replay(self, path, speed, loop, stop):
         from scapy.utils import PcapReader
 
         try:
-            while not self._stop.is_set():
+            while not stop.is_set():
                 previous = None
                 with PcapReader(path) as reader:
                     for pkt in reader:
-                        if self._stop.is_set():
+                        if stop.is_set():
                             return
                         sent_at = float(pkt.time)
                         if previous is not None and speed > 0:
                             gap = max(sent_at - previous, 0) / speed
-                            self._stop.wait(min(gap, 1.0))
+                            stop.wait(min(gap, 1.0))
                         previous = sent_at
                         self._enqueue(pkt, time.time())
                 if not loop:
@@ -212,4 +246,4 @@ class PacketPipeline:
         except Exception as exc:
             self._set(error=f"Could not read {path}: {exc}")
         finally:
-            self._set(running=False)
+            self._ended(stop)
