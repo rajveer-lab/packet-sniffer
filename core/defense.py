@@ -3,17 +3,25 @@
 Every alert gets plain advice (what it means and what to do), and where this
 computer can protect itself, a one-click fix:
 
-    Port scan, host sweep, brute force   block the attacker's IP, both ways (Windows Firewall)
-    ARP spoofing                         pin the real MAC of the spoofed address (static ARP entry)
-    Telnet / FTP / POP3 / IMAP           block that cleartext protocol going out (Windows Firewall)
-    Password sent in clear text          the same, plus: change that password
+    Port scan, host sweep, brute force,   block that address, both ways (firewall)
+    rogue DHCP server, unusual upload
+    ARP spoofing                          pin the real MAC of the spoofed address (static ARP entry)
+    Telnet / FTP / POP3 / IMAP            block that cleartext protocol going out (firewall)
+    Password sent in clear text           the same, plus: change that password
+    ICMP redirect                         stop obeying ICMP redirects
 
-Fixes change Windows settings, so they need PacketSniffer to run as
-Administrator. Every firewall rule it makes is named "PacketSniffer-...", ARP
-entries are temporary (gone after a restart), and every fix can be undone from
-the dashboard. Fixes never touch this computer's own addresses or its router,
-and commands are run without a shell, with addresses checked first, so alert
-text can never be turned into a command.
+The commands used on each system:
+
+    Windows   netsh advfirewall (firewall), netsh interface ipv4 (ARP, redirects)
+    Linux     iptables / ip6tables, ip neigh, sysctl
+    macOS     arp, sysctl (blocking needs the pf firewall, which is not automated)
+
+Fixes change system settings, so they need PacketSniffer to run as
+Administrator (root on Linux and macOS). Every firewall rule it makes is named
+"PacketSniffer-...", ARP entries are temporary (gone after a restart), and every
+fix can be undone from the dashboard. Fixes never touch this computer's own
+addresses or its router, and commands are run without a shell, with addresses
+checked first, so alert text can never be turned into a command.
 
 With --auto-block, attackers found by a port scan, host sweep or brute-force
 check are blocked as soon as they are detected.
@@ -21,6 +29,7 @@ check are blocked as soon as they are detected.
 
 import ctypes
 import ipaddress
+import os
 import queue
 import re
 import subprocess
@@ -84,44 +93,84 @@ def advice(alert):
                           f"Use {SAFER.get(service, 'the encrypted version of the service')} from now on.",
                           "If the same password is used anywhere else, change it there too."]
                 + ([f"Block {service} going out, so it cannot be used by mistake."] if fix else [])}
+    if rule == "bad_domain":
+        return {"meaning": "A program on this computer looked up a domain that is known to be malicious "
+                           "(or listed as a test of this check).",
+                "steps": ["Find the program: look at the APP column of that lookup, or Show packets.",
+                          "Run a full antivirus scan.",
+                          "If it was a link you clicked, do not enter any passwords on that site."]}
+    if rule == "dns_tunnel":
+        return {"meaning": "Data seems to be hidden inside DNS names, a way malware sneaks information out "
+                           "or takes orders past firewalls.",
+                "steps": ["Find the program doing the lookups (APP column) and check whether you trust it.",
+                          "Run a full antivirus scan.",
+                          "On a managed network, ask for DNS to be forced through a filtering resolver."]}
+    if rule == "large_upload":
+        return {"meaning": f"Much more data than usual is leaving this computer for {dst}. That can be a "
+                           "cloud backup or a video call, or someone copying your files out.",
+                "steps": ["Check which program is sending it (APP column) and whether you expected that.",
+                          f"If not, block {dst} and run a full antivirus scan."]}
+    if rule == "rogue_dhcp":
+        return {"meaning": f"{src} is handing out network settings as well as the real DHCP server. A fake "
+                           "server can make itself your router or DNS server and watch everything you do.",
+                "steps": [f"Block {src}.",
+                          "Disconnect and reconnect to get settings from the real server, or run: ipconfig /renew",
+                          "Tell the network administrator; switches can be set to allow only the real DHCP server."]}
+    if rule == "icmp_redirect":
+        return {"meaning": f"{src} told this computer to send some traffic through a different router. "
+                           "Attackers use this to get in the middle of your connections.",
+                "steps": ["Stop obeying ICMP redirects: home and office computers never need them.",
+                          f"Find out what {src} is; a normal home network never sends redirects."]}
     return {"meaning": alert.get("detail", ""), "steps": []}
 
 
 def fix_label(fix):
     if not fix:
         return None
-    if fix["action"] == "block_ip":
+    action = fix["action"]
+    if action == "block_ip":
         return f"Block {fix['ip']}"
-    if fix["action"] == "pin_arp":
+    if action == "pin_arp":
         return f"Pin the real MAC of {fix['ip']}"
-    return f"Block {fix['service']} going out"
+    if action == "disable_redirects":
+        return "Stop obeying ICMP redirects"
+    return f"Block {fix.get('service', 'that protocol')} going out"
+
+
+def running_as_admin():
+    if sys.platform == "win32":
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def default_gateway():
+    """This computer's router (default gateway), or None."""
+    try:
+        from scapy.route import Route
+
+        gateway = Route().route("0.0.0.0")[2]
+    except Exception:
+        return None
+    return gateway if gateway and gateway != "0.0.0.0" else None
 
 
 def protected_addresses():
     """This computer's own addresses and its router: never blocked."""
     found = []
     try:
-        import psutil
         import socket
+
+        import psutil
 
         found += [a.address.split("%")[0] for addrs in psutil.net_if_addrs().values() for a in addrs
                   if a.family in (socket.AF_INET, socket.AF_INET6)]
     except Exception:
         pass
-    try:
-        from scapy.route import Route
-
-        found.append(Route().route("0.0.0.0")[2])
-    except Exception:
-        pass
+    found.append(default_gateway())
     return [a for a in found if a and a != "0.0.0.0"]
-
-
-def running_as_admin():
-    try:
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
 
 
 class Defender:
@@ -130,7 +179,7 @@ class Defender:
         self.interface = interface        # e.g. "Wi-Fi", for static ARP entries
         self.protected = {str(p) for p in protected if p}   # this computer's addresses, the router
         self.auto_block = auto_block
-        self._run = run or self._netsh
+        self._run = run or self._execute
         self._is_admin = is_admin
         self._platform = platform
         self._clock = clock
@@ -143,10 +192,12 @@ class Defender:
     # ---- status ------------------------------------------------------------
 
     def unavailable_reason(self):
-        if self._platform != "win32":
-            return "One-click fixes use Windows Firewall, so they work on Windows only."
+        if self._platform not in ("win32", "linux", "darwin"):
+            return "One-click fixes work on Windows, Linux and macOS only."
         if not self._is_admin():
-            return "Run PacketSniffer as Administrator to apply fixes (right-click it, Run as administrator)."
+            if self._platform == "win32":
+                return "Run PacketSniffer as Administrator to apply fixes (right-click it, Run as administrator)."
+            return "Run PacketSniffer with sudo to apply fixes."
         return None
 
     def status(self):
@@ -183,7 +234,7 @@ class Defender:
         for command in commands:
             ok, output = self._run(command)
             if not ok:
-                return False, f"Windows refused: {output.strip() or 'unknown error'}"
+                return False, f"The system refused: {output.strip() or 'unknown error'}"
         with self._lock:
             self._next_id += 1
             self._applied[key] = {"id": self._next_id, "key": key, "fix": dict(fix), "label": label,
@@ -201,7 +252,7 @@ class Defender:
         for command in self._undo_plan(record["fix"]):
             ok, output = self._run(command)
             if not ok:
-                return False, f"Windows refused: {output.strip() or 'unknown error'}"
+                return False, f"The system refused: {output.strip() or 'unknown error'}"
         with self._lock:
             self._applied.pop(record["key"], None)
         return True, f"Undone: {record['label']}"
@@ -224,40 +275,88 @@ class Defender:
     # ---- commands ------------------------------------------------------------
 
     def _plan(self, fix):
+        """The commands for a fix on this system, and a description of what it does."""
         action = fix.get("action")
         if action == "block_ip":
             ip = self._checked_ip(fix.get("ip"))
-            name = f"{RULE_PREFIX}-block-{ip}"
-            return ([["advfirewall", "firewall", "add", "rule", f"name={name}", f"dir={d}", "action=block",
-                      f"remoteip={ip}"] for d in ("in", "out")], f"Blocked {ip} (in and out)")
+            return self._block_ip_commands(ip, "add"), f"Blocked {ip} (in and out)"
         if action == "block_port":
             port, proto = int(fix["port"]), str(fix.get("protocol", "TCP")).upper()
             if not 0 < port < 65536 or proto not in ("TCP", "UDP"):
                 raise ValueError("Not a valid port.")
-            name = f"{RULE_PREFIX}-block-outgoing-{proto}-{port}"
-            return ([["advfirewall", "firewall", "add", "rule", f"name={name}", "dir=out", "action=block",
-                      f"protocol={proto}", f"remoteport={port}"]],
+            return (self._block_port_commands(port, proto, "add"),
                     f"Blocked outgoing {fix.get('service', proto)} ({proto} port {port})")
         if action == "pin_arp":
             ip = self._checked_ip(fix.get("ip"), allow_router=True)
             mac = str(fix.get("mac", ""))
             if not MAC.match(mac):
                 raise ValueError("Not a valid MAC address.")
-            if not self.interface:
+            if self._platform != "darwin" and not self.interface:
                 raise ValueError("The network interface is not known, so the MAC cannot be pinned.")
-            return ([["interface", "ipv4", "add", "neighbors", self.interface, ip, mac.replace(":", "-"),
-                      "store=active"]], f"Pinned {ip} to its real MAC {mac.lower()}")
+            return self._pin_commands(ip, mac.lower(), "add"), f"Pinned {ip} to its real MAC {mac.lower()}"
+        if action == "disable_redirects":
+            return self._redirect_commands(enabled=False), "Stopped obeying ICMP redirects"
         raise ValueError("This alert has no automatic fix.")
 
     def _undo_plan(self, fix):
         action = fix["action"]
         if action == "block_ip":
-            return [["advfirewall", "firewall", "delete", "rule", f"name={RULE_PREFIX}-block-{fix['ip']}"]]
+            return self._block_ip_commands(fix["ip"], "delete")
         if action == "block_port":
-            proto = str(fix.get("protocol", "TCP")).upper()
-            return [["advfirewall", "firewall", "delete", "rule",
-                     f"name={RULE_PREFIX}-block-outgoing-{proto}-{int(fix['port'])}"]]
-        return [["interface", "ipv4", "delete", "neighbors", self.interface, fix["ip"]]]
+            return self._block_port_commands(int(fix["port"]), str(fix.get("protocol", "TCP")).upper(), "delete")
+        if action == "pin_arp":
+            return self._pin_commands(fix["ip"], str(fix.get("mac", "")).lower(), "delete")
+        return self._redirect_commands(enabled=True)
+
+    def _block_ip_commands(self, ip, how):
+        name = f"{RULE_PREFIX}-block-{ip}"
+        if self._platform == "win32":
+            if how == "delete":
+                return [["netsh", "advfirewall", "firewall", "delete", "rule", f"name={name}"]]
+            return [["netsh", "advfirewall", "firewall", "add", "rule", f"name={name}", f"dir={d}", "action=block",
+                     f"remoteip={ip}"] for d in ("in", "out")]
+        if self._platform == "linux":
+            tables = "ip6tables" if ":" in ip else "iptables"
+            flag = "-I" if how == "add" else "-D"
+            comment = ["-m", "comment", "--comment", name]
+            return [[tables, flag, "INPUT", "-s", ip, "-j", "DROP", *comment],
+                    [tables, flag, "OUTPUT", "-d", ip, "-j", "DROP", *comment]]
+        raise ValueError("Blocking an address on macOS needs the pf firewall; use System Settings > Network > Firewall.")
+
+    def _block_port_commands(self, port, proto, how):
+        name = f"{RULE_PREFIX}-block-outgoing-{proto}-{port}"
+        if self._platform == "win32":
+            if how == "delete":
+                return [["netsh", "advfirewall", "firewall", "delete", "rule", f"name={name}"]]
+            return [["netsh", "advfirewall", "firewall", "add", "rule", f"name={name}", "dir=out", "action=block",
+                     f"protocol={proto}", f"remoteport={port}"]]
+        if self._platform == "linux":
+            return [["iptables", "-I" if how == "add" else "-D", "OUTPUT", "-p", proto.lower(), "--dport", str(port),
+                     "-j", "DROP", "-m", "comment", "--comment", name]]
+        raise ValueError("Blocking a port on macOS needs the pf firewall; use System Settings > Network > Firewall.")
+
+    def _pin_commands(self, ip, mac, how):
+        if self._platform == "win32":
+            if how == "delete":
+                return [["netsh", "interface", "ipv4", "delete", "neighbors", self.interface, ip]]
+            return [["netsh", "interface", "ipv4", "add", "neighbors", self.interface, ip, mac.replace(":", "-"),
+                     "store=active"]]
+        if self._platform == "linux":
+            if how == "delete":
+                return [["ip", "neigh", "del", ip, "dev", self.interface]]
+            return [["ip", "neigh", "replace", ip, "lladdr", mac.replace("-", ":"), "dev", self.interface,
+                     "nud", "permanent"]]
+        if how == "delete":
+            return [["arp", "-d", ip]]
+        return [["arp", "-s", ip, mac.replace("-", ":")]]
+
+    def _redirect_commands(self, enabled):
+        if self._platform == "win32":
+            return [["netsh", "interface", "ipv4", "set", "global",
+                     f"icmpredirects={'enabled' if enabled else 'disabled'}"]]
+        if self._platform == "linux":
+            return [["sysctl", "-w", f"net.ipv4.conf.all.accept_redirects={1 if enabled else 0}"]]
+        return [["sysctl", "-w", f"net.inet.icmp.drop_redirect={0 if enabled else 1}"]]
 
     def _checked_ip(self, value, allow_router=False):
         try:
@@ -274,11 +373,16 @@ class Defender:
     def _key(fix):
         if fix["action"] == "block_port":
             return ("block_port", str(fix.get("protocol", "TCP")).upper(), int(fix["port"]))
+        if fix["action"] == "disable_redirects":
+            return ("disable_redirects",)
         return (fix["action"], str(fix.get("ip")))
 
     @staticmethod
-    def _netsh(args):
-        """Run netsh with a list of arguments: no shell, so nothing in them is interpreted."""
-        result = subprocess.run(["netsh", *args], capture_output=True, text=True, timeout=15,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    def _execute(args):
+        """Run a command from a list of arguments: no shell, so nothing in them is interpreted."""
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, timeout=15,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
         return result.returncode == 0, (result.stdout or "") + (result.stderr or "")
