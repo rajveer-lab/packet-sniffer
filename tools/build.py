@@ -45,7 +45,7 @@ BABEL = ("build/cache/babel.min.js", f"{CDN}/babel-standalone/7.26.4/babel.min.j
 # but the sniffer never needs; leaving them out makes the program about 5x smaller.
 EXCLUDE = [
     "boto3", "botocore", "contourpy", "cryptography", "IPython", "lxml", "matplotlib",
-    "numpy", "pandas", "PIL", "pytest", "sqlalchemy", "sqlite3", "tkinter", "tzdata", "yaml",
+    "numpy", "pandas", "PIL", "pytest", "sqlalchemy", "tkinter", "tzdata", "yaml",
 ]
 
 APP_SOURCE = "static/app.jsx"
@@ -152,6 +152,7 @@ def build_exe():
         "--name", "PacketSniffer", "--console",
         "--distpath", path("dist"), "--workpath", path("build/pyinstaller"), "--specpath", path("build"),
         "--add-data", f"{path('static')}{os.pathsep}static",
+        "--add-data", f"{path('core/blocklist.txt')}{os.pathsep}core",
         *[arg for module in EXCLUDE for arg in ("--exclude-module", module)],
         path("sniffer.py"),
     ], check=True, cwd=ROOT)
