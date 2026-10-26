@@ -1,0 +1,19 @@
+# Domains the "Blocklisted domain" check alerts on, one per line.
+# A domain also matches every name under it (bad.example matches www.bad.example).
+#
+# These are only test and demonstration domains: sites published for testing
+# security tools, and names under the reserved .example top-level domain.
+# For real protection, load a threat feed as well, for example:
+#     python sniffer.py --blocklist my-blocklist.txt
+# (one domain per line; lines starting with # and "0.0.0.0 domain" hosts-file lines both work)
+
+# Google Safe Browsing's test pages
+testsafebrowsing.appspot.com
+
+# WICAR, a site of harmless test "malware" for checking security tools
+malware.wicar.org
+
+# Reserved demonstration names (used by samples/attack_traffic.pcap)
+malware.example
+phishing.example
+c2.example
