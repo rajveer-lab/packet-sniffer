@@ -55,6 +55,11 @@ class NameCache:
             if getattr(answer, "type", None) in ADDRESS_TYPES:
                 self._remember(str(answer.rdata), asked or label(answer.rrname))
 
+    def remember(self, ip, name):
+        """Name an address learned some other way, e.g. from the site name of an HTTPS connection."""
+        if ip and name:
+            self._remember(ip, name)
+
     def name(self, ip):
         if ip is None:
             return None
