@@ -112,3 +112,114 @@ def test_compiled_dashboard_is_up_to_date():
     source = hashlib.sha256(open("static/app.jsx", "rb").read().replace(b"\r\n", b"\n")).hexdigest()
     with open("static/app.js", encoding="utf-8") as built:
         assert f"sha256 {source}" in built.readline()
+
+
+# ---- one-click fixes, capture control and exports ---------------------------------------
+
+from core.defense import Defender  # noqa: E402
+
+
+class Netsh:
+    def __init__(self):
+        self.commands = []
+
+    def __call__(self, args):
+        self.commands.append(args)
+        return True, ""
+
+
+def scan(monitor):
+    for port in range(1, 21):
+        monitor.inspect({"time": 100 + port * 0.01, "proto": "TCP", "src": "192.168.1.66", "dst": "192.168.1.5",
+                         "sport": 40000, "dport": port, "flags": ["SYN"]})
+    return monitor.summary()["alerts"][0]["id"]
+
+
+@pytest.fixture
+def defended(store, monitor):
+    netsh = Netsh()
+    defender = Defender(interface="Wi-Fi", protected=["192.168.1.5"], run=netsh, is_admin=lambda: True,
+                        platform="win32")
+    return create_app(store, FakePipeline(), monitor, defender=defender).test_client(), netsh
+
+
+def test_alerts_come_with_advice_and_a_fix(defended, monitor):
+    client, _ = defended
+    scan(monitor)
+    data = client.get("/api/alerts").get_json()
+    alert = data["alerts"][0]
+    assert alert["fix_label"] == "Block 192.168.1.66"
+    assert alert["advice"]["steps"][0] == "Block 192.168.1.66 if you do not recognise it."
+    assert data["defense"]["available"] is True
+
+
+def test_applying_and_undoing_a_fix(defended, monitor):
+    client, netsh = defended
+    alert_id = scan(monitor)
+    response = client.post("/api/defense/apply", json={"alert_id": alert_id})
+    assert response.status_code == 200 and response.get_json()["message"] == "Blocked 192.168.1.66 (in and out)"
+    assert len(netsh.commands) == 2
+    assert client.get("/api/alerts").get_json()["alerts"][0]["fixed"]["label"].startswith("Blocked")
+    fix_id = response.get_json()["defense"]["applied"][0]["id"]
+    assert client.post("/api/defense/undo", json={"fix_id": fix_id}).get_json()["ok"] is True
+    assert client.post("/api/defense/apply", json={"alert_id": 999}).status_code == 404
+
+
+def test_fixes_cannot_be_triggered_by_a_form_or_another_website(defended, monitor):
+    client, netsh = defended
+    alert_id = scan(monitor)
+    assert client.post("/api/defense/apply", data={"alert_id": alert_id}).status_code == 415
+    other_site = client.post("/api/defense/apply", json={"alert_id": alert_id}, headers={"Origin": "https://evil.example"})
+    assert other_site.status_code == 403
+    assert netsh.commands == []
+
+
+class ControllablePipeline(FakePipeline):
+    def __init__(self):
+        self.running, self.stopped = True, None
+
+    def status(self):
+        return dict(super().status(), running=self.running, stopped=self.stopped)
+
+    def stop_from_dashboard(self):
+        self.running, self.stopped = False, "stopped from the dashboard"
+
+    def restart(self):
+        if self.running:
+            return False
+        self.running, self.stopped = True, None
+        return True
+
+
+def test_stopping_and_starting_capture_from_the_dashboard(store):
+    client = create_app(store, ControllablePipeline()).test_client()
+    stopped = client.post("/api/capture/stop", json={}).get_json()
+    assert stopped["capture"]["stopped"] == "stopped from the dashboard"
+    assert client.post("/api/capture/start", json={}).get_json()["capture"]["running"] is True
+    assert client.post("/api/capture/start", json={}).status_code == 409
+    assert client.post("/api/capture/reboot", json={}).status_code == 404
+
+
+def test_csv_exports_are_safe_to_open_in_excel(store, monitor):
+    store.add({"time": time.time(), "length": 90, "proto": "UDP", "src": "192.168.1.9", "dst": "8.8.8.8",
+               "sport": 40122, "dport": 53, "flags": [], "info": "=HYPERLINK(\"http://evil\")", "app": "chrome.exe"})
+    scan(monitor)
+    client = create_app(store, FakePipeline(), monitor).test_client()
+    packets = client.get("/api/export/packets.csv?proto=UDP")
+    assert packets.headers["Content-Disposition"] == 'attachment; filename="packets.csv"'
+    lines = packets.get_data(as_text=True).splitlines()
+    assert lines[0].startswith("id,time,program,source")
+    assert len(lines) == 2 and "chrome.exe" in lines[1]
+    assert "'=HYPERLINK" in lines[1]                         # shown as text, never run as a formula
+    alerts = client.get("/api/export/alerts.csv").get_data(as_text=True).splitlines()
+    assert "Port scan from 192.168.1.66" in alerts[1] and "Block 192.168.1.66" in alerts[1]
+
+
+def test_top_hosts_get_names_from_dns(store):
+    from core.names import NameCache
+
+    names = NameCache()
+    names._remember("203.0.113.10", "video.example.com")
+    data = create_app(store, names=names).test_client().get("/api/stats").get_json()
+    assert {"host": "203.0.113.10", "name": "video.example.com"} in [
+        {"host": h["host"], "name": h["name"]} for h in data["top_hosts"]]
