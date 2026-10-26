@@ -125,3 +125,31 @@ def test_top_applications_over_the_retention_period():
     ]
     clock.now = 1100.0
     assert store.stats()["top_apps"] == []
+
+
+def test_raw_bytes_stay_with_their_packet_and_leave_with_it():
+    clock = FakeClock(1000.0)
+    store = TrafficStore(max_packets=2, retention_seconds=30, clock=clock)
+    first = store.add(record(1000), raw=(b"\x01\x02", 1))
+    store.add(record(1000), raw=(b"\x03", 1))
+    assert store.get(first["id"]) == (first, (b"\x01\x02", 1))
+    store.add(record(1000), raw=(b"\x04", 1))              # pushes the first one out
+    assert store.get(first["id"]) is None
+    assert [raw for _, raw in store.with_raw()] == [(b"\x03", 1), (b"\x04", 1)]
+    assert [r["id"] for r, _ in store.with_raw(lambda r: r["id"] == 3)] == [3]
+    clock.now = 1100.0                                      # everything decays, bytes too
+    assert store.with_raw() == [] and store._raw == {}
+
+
+def test_bytes_per_second_for_the_busiest_programs():
+    clock = FakeClock(1000.5)
+    store = TrafficStore(window_seconds=10, clock=clock)
+    for t, app, size in ((999.1, "chrome.exe", 1000), (999.2, "chrome.exe", 500), (1000.1, "Spotify.exe", 300),
+                         (1000.2, None, 9000)):
+        store.add(dict(record(t, length=size), app=app))
+    graph = store.stats(graph_apps=4)["app_bandwidth"]
+    assert graph["apps"] == ["chrome.exe", "Spotify.exe"]
+    assert graph["points"][-2] == {"t": 999, "bytes": {"chrome.exe": 1500, "Spotify.exe": 0}}
+    assert graph["points"][-1] == {"t": 1000, "bytes": {"chrome.exe": 0, "Spotify.exe": 300}}
+    clock.now = 1020.0
+    assert store.stats()["app_bandwidth"]["apps"] == []
