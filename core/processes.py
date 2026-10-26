@@ -31,15 +31,6 @@ def normalize(ip):
         return ip
 
 
-def is_group_address(ip):
-    """Broadcast or multicast: delivered to sockets bound to every address."""
-    try:
-        address = ipaddress.ip_address(ip)
-    except ValueError:
-        return False
-    return address.is_multicast or (address.version == 4 and ip.endswith(".255"))
-
-
 class ProcessMap:
     def __init__(self, refresh_seconds=1.0, keep_seconds=60, min_reread_seconds=0.25, clock=time.monotonic,
                  read_connections=None, process_name=None, local_addresses=None):
@@ -121,9 +112,11 @@ class ProcessMap:
         for ip, port in ends:
             if port is not None and (proto, ip, port) in table:
                 return table[(proto, ip, port)][0]
-        # Sockets bound to every address receive our own, broadcast and multicast traffic.
+        # Sockets bound to every address (0.0.0.0): only for the end that is this
+        # computer. Other devices' broadcasts reach many listening programs at once,
+        # so naming one of them would wrongly suggest it sent the packet.
         for ip, port in ends:
-            if port is not None and (ip in self._local or is_group_address(ip or "")):
+            if port is not None and ip in self._local:
                 if (proto, ANY_ADDRESS, port) in table:
                     return table[(proto, ANY_ADDRESS, port)][0]
         return None
