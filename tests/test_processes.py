@@ -44,11 +44,13 @@ def test_tcp_packets_are_named_in_both_directions():
     assert pm.lookup(rec("TCP", ME, 53685, "104.18.32.47", 443)) is None
 
 
-def test_sockets_bound_to_every_address_get_our_broadcast_and_multicast_traffic():
+def test_sockets_bound_to_every_address_only_name_this_computers_end():
     pm, _ = make([Conn(UDP, ("0.0.0.0", 5353), (), "NONE", 3300)])
-    assert pm.lookup(rec("UDP", ME, 5353, "224.0.0.251", 5353)) == "svchost.exe"           # we send
-    assert pm.lookup(rec("UDP", "172.17.73.18", 5353, "224.0.0.251", 5353)) == "svchost.exe"  # multicast to us
-    assert pm.lookup(rec("UDP", "172.17.74.251", 5353, "172.17.79.255", 5353)) == "svchost.exe"  # broadcast
+    assert pm.lookup(rec("UDP", ME, 5353, "224.0.0.251", 5353)) == "svchost.exe"     # we send
+    assert pm.lookup(rec("UDP", "172.17.76.1", 5353, ME, 5353)) == "svchost.exe"     # sent to us
+    # Other devices' multicasts and broadcasts: no program here sent them
+    assert pm.lookup(rec("UDP", "172.17.73.18", 5353, "224.0.0.251", 5353)) is None
+    assert pm.lookup(rec("UDP", "172.17.74.251", 5353, "172.17.79.255", 5353)) is None
     # A remote server's port 5353 is not our socket
     assert pm.lookup(rec("UDP", "8.8.8.8", 5353, "8.8.4.4", 40000)) is None
 
