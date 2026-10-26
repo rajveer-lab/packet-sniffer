@@ -141,3 +141,53 @@ def test_live_packets_are_named_with_their_program(tmp_path):
     assert [p["app"] for p in store.packets_after(0)] == [None, "chrome.exe", "chrome.exe"]
     assert store.stats()["top_apps"][0]["app"] == "chrome.exe"
     assert pipeline.status()["apps"] is True
+
+
+def test_stop_from_the_dashboard_and_start_again(tmp_path):
+    pcap = tmp_path / "three.pcap"
+    write_pcap(pcap)
+    store = TrafficStore()
+    recorder = RotatingPcapWriter(str(tmp_path / "saved"))
+    pipeline = PacketPipeline(store, recorder=recorder)
+
+    pipeline.start_replay(str(pcap), speed=1, loop=True)
+    assert wait_for(lambda: store.last_id >= 1)
+    pipeline.stop_from_dashboard()
+    status = pipeline.status()
+    assert (status["running"], status["stopped"]) == (False, "stopped from the dashboard")
+    stopped_at = store.last_id
+    time.sleep(0.6)
+    assert store.last_id == stopped_at                      # nothing is collected while stopped
+
+    assert pipeline.restart() is True
+    assert pipeline.status()["running"] and pipeline.status()["stopped"] is None
+    assert pipeline.restart() is False                      # already running
+    assert wait_for(lambda: store.last_id > stopped_at)
+    time.sleep(0.3)
+    assert pipeline.status()["running"]                     # the old run ending did not flip it
+    pipeline.stop()
+    assert recorder.status()["written"] == store.last_id    # saving carried on after the restart
+
+
+def test_addresses_get_names_from_dns_answers(tmp_path):
+    from scapy.layers.dns import DNS, DNSQR, DNSRR
+
+    from core.names import NameCache
+
+    pcap = tmp_path / "dns.pcap"
+    packets = [
+        ETH / IP(src="8.8.8.8", dst="192.168.1.5") / UDP(sport=53, dport=53011) / DNS(
+            qr=1, qd=DNSQR(qname="video.example.com"), an=DNSRR(rrname="video.example.com", rdata="203.0.113.10")),
+        ETH / IP(src="192.168.1.5", dst="203.0.113.10") / TCP(sport=52344, dport=443, flags="S"),
+    ]
+    for i, pkt in enumerate(packets):
+        pkt.time = 1_000_000 + i
+    wrpcap(str(pcap), packets)
+    store = TrafficStore()
+    pipeline = PacketPipeline(store, names=NameCache())
+    pipeline.start_replay(str(pcap), speed=0)
+    assert wait_for(lambda: store.last_id == 2)
+    pipeline.stop()
+    answer, syn = store.packets_after(0)
+    assert answer["info"] == "DNS answer video.example.com = 203.0.113.10"
+    assert (syn["dst"], syn["dst_name"], syn["src_name"]) == ("203.0.113.10", "video.example.com", None)
