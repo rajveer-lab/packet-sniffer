@@ -8,8 +8,11 @@ Old data decays instead of piling up:
     or when ``max_packets`` newer ones have arrived;
   * protocol share and top hosts count only the last ``retention_seconds``
     (kept as one small tally per second, dropped as it expires);
-  * the bandwidth graph keeps only the last ``window_seconds``.
+  * the bandwidth graphs (total and per program) keep only the last ``window_seconds``.
 Only the lifetime totals (packets and bytes captured) keep growing.
+
+The raw bytes of each packet are kept alongside it, for the hex view and the
+.pcap download, and leave with it.
 """
 
 import threading
@@ -72,18 +75,24 @@ class TrafficStore:
         # Sliding window: whole second -> bytes / packets seen in that second
         self._second_bytes = Counter()
         self._second_packets = Counter()
+        self._second_apps = {}          # whole second -> Counter of bytes per program
+        self._raw = {}                  # packet id -> (bytes, link type)
 
     @property
     def last_id(self):
         with self._lock:
             return self._last_id
 
-    def add(self, record):
-        """Store one parsed packet record and update every counter."""
+    def add(self, record, raw=None):
+        """Store one parsed packet record (and its raw bytes) and update every counter."""
         with self._lock:
             self._last_id += 1
             record = dict(record, id=self._last_id)
+            if len(self._packets) == self._packets.maxlen:   # the oldest is about to drop out
+                self._raw.pop(self._packets[0]["id"], None)
             self._packets.append(record)
+            if raw is not None:
+                self._raw[self._last_id] = raw
 
             size = record["length"]
             self._total_packets += 1
@@ -94,6 +103,8 @@ class TrafficStore:
 
             self._second_bytes[second] += size
             self._second_packets[second] += 1
+            if record.get("app"):
+                self._second_apps.setdefault(second, Counter())[record["app"]] += size
             self._expire()
             self._prune_window()
             return record
@@ -116,7 +127,22 @@ class TrafficStore:
     def packets_after(self, after_id=0, limit=200, match=None):
         return self.query(after_id, limit, match)["packets"]
 
-    def stats(self, top_hosts=5, top_apps=6):
+    def get(self, packet_id):
+        """One stored packet and its raw bytes ((bytes, link type) or None), or None if it has decayed."""
+        with self._lock:
+            for record in reversed(self._packets):
+                if record["id"] == packet_id:
+                    return record, self._raw.get(packet_id)
+        return None
+
+    def with_raw(self, match=None):
+        """Every stored packet that passes ``match``, oldest first, with its raw bytes."""
+        with self._lock:
+            self._expire()
+            return [(r, self._raw[r["id"]]) for r in self._packets
+                    if r["id"] in self._raw and (match is None or match(r))]
+
+    def stats(self, top_hosts=5, top_apps=6, graph_apps=4):
         with self._lock:
             self._expire()
             self._prune_window()
@@ -148,6 +174,17 @@ class TrafficStore:
                 }
                 for second in range(now - self._window + 1, now + 1)
             ]
+            # Bytes per second for the busiest programs of the window
+            seconds = range(now - self._window + 1, now + 1)
+            totals = Counter()
+            for counts in self._second_apps.values():
+                totals.update(counts)
+            graphed = [app for app, _ in totals.most_common(graph_apps)]
+            app_bandwidth = {
+                "apps": graphed,
+                "points": [{"t": s, "bytes": {a: self._second_apps.get(s, {}).get(a, 0) for a in graphed}}
+                           for s in seconds],
+            }
             # The current second is still filling up, so rates use the last full one.
             last_full = now - 1
             return {
@@ -164,13 +201,14 @@ class TrafficStore:
                 "top_hosts": hosts,
                 "top_apps": apps,
                 "bandwidth": bandwidth,
+                "app_bandwidth": app_bandwidth,
             }
 
     def _expire(self):
         """Forget packets and per-second tallies older than the retention period."""
         cutoff = self._clock() - self.retention
         while self._packets and self._packets[0]["time"] < cutoff:
-            self._packets.popleft()
+            self._raw.pop(self._packets.popleft()["id"], None)
         # Seconds arrive in order, so the oldest tallies are at the front.
         while self._seconds:
             second = next(iter(self._seconds))
@@ -183,3 +221,4 @@ class TrafficStore:
         for second in [s for s in self._second_bytes if s <= oldest]:
             del self._second_bytes[second]
             del self._second_packets[second]
+            self._second_apps.pop(second, None)
