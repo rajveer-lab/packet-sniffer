@@ -68,6 +68,11 @@ class RotatingPcapWriter:
                 self._writer.close()
                 self._writer = None
 
+    def reopen(self):
+        """Accept packets again after close(); they go into a new file."""
+        with self._lock:
+            self._closed = False
+
     def files(self):
         """Saved capture files, oldest first (names start with the time)."""
         pattern = os.path.join(glob.escape(self.folder), f"{glob.escape(self.prefix)}-*.pcap")
