@@ -12,7 +12,9 @@ more than about ``max_mb * keep_files`` of disk: old traffic decays away.
 """
 
 import glob
+import io
 import os
+import struct
 import threading
 import time
 
@@ -20,6 +22,22 @@ from scapy.utils import PcapWriter
 
 FILE_HEADER = 24     # bytes at the start of every pcap file
 PACKET_HEADER = 16   # bytes before every packet in a pcap file
+
+
+def pcap_bytes(packets):
+    """A whole .pcap file in memory from [(time, raw bytes, link type)], for downloading.
+
+    A pcap file has one link type; packets of another type than the first are left out."""
+    link = packets[0][2] if packets else 1
+    out = io.BytesIO()
+    out.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, link))
+    for when, data, kind in packets:
+        if kind != link:
+            continue
+        seconds = int(when)
+        out.write(struct.pack("<IIII", seconds, int((when - seconds) * 1_000_000), len(data), len(data)))
+        out.write(data)
+    return out.getvalue()
 
 
 class RotatingPcapWriter:
