@@ -200,9 +200,78 @@ def replay_sample(name):
 
 def test_attack_sample_triggers_every_check():
     s = replay_sample("attack_traffic.pcap")
-    assert sorted(set(rules_fired(s))) == sorted(r["rule"] for r in s["rules"])
-    assert s["counts"] == {"high": 7, "medium": 3, "low": 1}
+    # All but the unusual-upload check: 50 MB is too much for a sample file (tested below instead)
+    expected = sorted(r["rule"] for r in s["rules"] if r["rule"] != "large_upload")
+    assert sorted(set(rules_fired(s))) == expected
+    assert s["counts"] == {"high": 9, "medium": 5, "low": 1}
 
 
 def test_normal_home_traffic_raises_no_alerts():
     assert replay_sample("sample_traffic.pcap")["alerts"] == []
+
+
+def dns_query(time, name, src=LAPTOP, app=None):
+    return rec(time, proto="UDP", src=src, dst="8.8.8.8", sport=53011, dport=53, flags=(), dns_query=name, app=app)
+
+
+def test_blocklisted_domains_and_everything_under_them(tmp_path):
+    from core.security import load_blocklist
+
+    hosts = tmp_path / "feed.txt"
+    hosts.write_text("# a hosts-file feed\n0.0.0.0 bad.example\nevil.example  # comment\n\n")
+    assert load_blocklist(str(hosts)) == ["bad.example", "evil.example"]
+    monitor = SecurityMonitor(blocklist=load_blocklist(str(hosts)))
+    s = feed(monitor, [dns_query(100, "www.bad.example", app="chrome.exe"), dns_query(101, "notbad.example"),
+                       dns_query(102, "example.com")])
+    assert rules_fired(s) == ["bad_domain"]
+    assert s["alerts"][0]["detail"] == f"{LAPTOP} (chrome.exe) looked up www.bad.example, which is on the blocklist"
+    assert "malware.example" in SecurityMonitor().blocklist        # the built-in test list loads by default
+
+
+def test_dns_tunneling_by_long_labels_or_many_random_subdomains():
+    long_label = SecurityMonitor()
+    assert rules_fired(feed(long_label, [dns_query(100, "a" * 55 + ".exfil.example")])) == ["dns_tunnel"]
+    many = SecurityMonitor(tunnel_subdomains=25)
+    names = [dns_query(100 + i, f"{i:032x}.t.tunnel.example") for i in range(30)]
+    s = feed(many, names)
+    assert rules_fired(s) == ["dns_tunnel"]
+    # Fires at 25 names, then keeps its count up to date
+    assert s["alerts"][0]["detail"].endswith("looked up 30 different random-looking names under tunnel.example within 60 s")
+
+
+def test_ordinary_lookups_are_not_tunneling():
+    normal = ["www.youtube.com", "i.ytimg.com", "fonts.gstatic.com", "d1a2b3c4d5e6f7.cloudfront.net",
+              "v10.events.data.microsoft.com", "_dns-sd._udp.local", "e6858.dscx.akamaiedge.net"]
+    assert feed(SecurityMonitor(), [dns_query(100 + i, n) for i, n in enumerate(normal * 5)])["alerts"] == []
+
+
+def test_unusual_upload_to_one_outside_address():
+    monitor = SecurityMonitor(upload_mb=1, upload_window=60)
+    chunk = dict(proto="TCP", src=LAPTOP, dst="34.1.2.3", sport=50000, dport=443, flags=("PSH", "ACK"),
+                 length=100_000, dst_name="drive.example.com", app="backup.exe")
+    s = feed(monitor, [rec(100 + i, **chunk) for i in range(12)])
+    assert rules_fired(s) == ["large_upload"]
+    alert = s["alerts"][0]
+    assert alert["title"] == "Unusual upload to 34.1.2.3 (drive.example.com)"
+    assert alert["detail"] == "1 MB sent within 60 s by backup.exe"
+    assert alert["fix"] == {"action": "block_ip", "ip": "34.1.2.3"}
+    # Traffic inside the home network, or arriving from outside, is not an upload
+    inside = SecurityMonitor(upload_mb=1)
+    assert feed(inside, [rec(100 + i, **dict(chunk, dst="192.168.1.20")) for i in range(12)])["alerts"] == []
+
+
+def test_a_second_dhcp_server_is_rogue():
+    def offer(time, server):
+        return rec(time, proto="UDP", src=server, dst="255.255.255.255", sport=67, dport=68, flags=(),
+                   dhcp_type="offer", dhcp_server=server)
+
+    s = feed(SecurityMonitor(), [offer(100, ROUTER), offer(200, ROUTER), offer(201, ATTACKER)])
+    assert rules_fired(s) == ["rogue_dhcp"]
+    assert s["alerts"][0]["fix"] == {"action": "block_ip", "ip": ATTACKER}
+
+
+def test_icmp_redirects():
+    s = feed(SecurityMonitor(), [rec(100, proto="ICMP", src=ATTACKER, dst=LAPTOP, sport=None, dport=None,
+                                     flags=(), icmp_type=5)])
+    assert rules_fired(s) == ["icmp_redirect"]
+    assert s["alerts"][0]["fix"] == {"action": "disable_redirects"}
