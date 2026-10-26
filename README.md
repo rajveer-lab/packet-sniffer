@@ -3,10 +3,12 @@
 Computer Networks project (team Big Packet). The sniffer captures live packets from a
 network interface, decodes the Ethernet, IP, TCP and UDP headers, and shows the
 traffic on a web dashboard that refreshes every second. It names the program on this
-computer behind each packet (chrome.exe, Spotify.exe, ...), filters the packet table,
-checks every packet for common attacks and for passwords sent in clear text, keeps
-the dashboard locked behind an access code, and lets old data decay so it can run for
-hours without filling memory or disk.
+computer behind each packet (chrome.exe, Spotify.exe, ...) and the website behind each
+address, filters the packet table, checks every packet for common attacks and for
+passwords sent in clear text, explains every alert and fixes it with one click where it
+can (blocking the attacker in Windows Firewall), keeps the dashboard locked behind an
+access code, and lets old data decay so it can run for hours without filling memory or
+disk.
 
 ## Download and run (Windows)
 
@@ -16,6 +18,9 @@ hours without filling memory or disk.
 2. Unzip, then double-click `PacketSniffer\PacketSniffer.exe`. It starts capturing and
    opens the dashboard in your browser, already unlocked.
 3. Close its window (or press Ctrl+C in it) to stop.
+
+To use the one-click security fixes, right-click `PacketSniffer.exe` and choose
+**Run as administrator**: changing Windows Firewall needs it.
 
 `HOW TO RUN.txt` in the zip has the demo commands. To make the zip yourself, see
 [Building](#building).
@@ -59,6 +64,7 @@ If no packets appear on Windows, run the terminal as Administrator.
 | `--save [FOLDER]` | also save packets to rotating .pcap files (default folder `captures`) |
 | `--file-size 10 --keep-files 5` | with `--save`: new file every 10 MB, keep only the newest 5 |
 | `--no-security` | turn off the security checks |
+| `--auto-block` | block port scanners, host sweepers and brute-forcers as soon as they are found (Administrator) |
 | `--no-apps` | do not name the program behind each packet |
 | `--token CODE` | choose the dashboard access code (default: a new random one each run) |
 | `--no-auth` | no access code (only on a computer you trust) |
@@ -100,8 +106,16 @@ which only write a file and send nothing on the network.
 - **APP column** and **Top applications**: the program on this computer that sent or
   received each packet, and which programs use the most traffic. Click a program to see
   only its packets.
+- **Website names**: addresses are shown with the name the computer looked up for them
+  (`203.0.113.10` &rarr; `video.example.com`), learned from the DNS answers going past.
+  DNS rows say what was asked and answered.
 - **Packet details**: click a row to see its program and headers, layer by layer.
-- **Security**: the seven checks with their status, and the alerts they raised.
+- **Security**: the seven checks with their status, and the alerts they raised. Each
+  alert has **How to fix** (what it means, what to do, and a one-click fix where there is
+  one) and **Show packets**. **Protection** lists the fixes in place, each with Undo.
+- **Stop capture / Start capture** in the top bar, without closing the program.
+- **Export CSV**: the packets shown (with the current filters), and the security alerts
+  with their advice, as spreadsheets.
 - **Protocols** and **Top hosts**: shares over the retention period (5 minutes by default).
 
 The protocol buttons and other table filters only change what is shown, so they can be
@@ -151,6 +165,32 @@ replaying a capture gives the same alerts the live traffic did.
 Only packets to or from those cleartext login ports are opened up and read, and a
 password alert says who logged in where and how long the password was, never the
 password itself. Encrypted traffic (HTTPS, SSH) cannot be read, which is the point.
+
+## Fixing what it finds
+
+Every alert says what it means and what to do about it, and where this computer can
+protect itself there is a one-click fix (`core/defense.py`):
+
+| Alert | One-click fix | Windows command it runs |
+|---|---|---|
+| Port scan, host sweep, brute-force login | block the attacker's IP, in and out | `netsh advfirewall firewall add rule name=PacketSniffer-block-<ip> dir=in/out action=block remoteip=<ip>` |
+| ARP spoofing | pin the real MAC of the spoofed address, so the fake one is ignored | `netsh interface ipv4 add neighbors <interface> <ip> <real mac> store=active` |
+| Telnet, FTP, POP3 or IMAP in use, or a password sent over them | block that protocol going out | `netsh advfirewall firewall add rule name=PacketSniffer-block-outgoing-TCP-<port> dir=out action=block protocol=TCP remoteport=<port>` |
+| SYN flood, plain HTTP | advice only: flood senders are forged, and blocking all HTTP would break much of the web | |
+
+- Fixes need PacketSniffer to run **as Administrator**; otherwise the dashboard shows the
+  advice and says so. They are Windows-only.
+- Every fix can be undone from the **Protection** list. Firewall rules are all named
+  `PacketSniffer-...`; pinned ARP entries are temporary and disappear after a restart.
+- A fix never blocks this computer's own addresses, its router, loopback, broadcast or
+  multicast addresses.
+- Fixes are taken from the alert on the server (the page only sends the alert's number),
+  addresses are checked to be real IP and MAC addresses, and netsh runs without a shell,
+  so text captured from the network can never become a command.
+- The fix, undo and start/stop calls accept only JSON from the dashboard's own address,
+  so a link or form on another website cannot trigger them.
+- `--auto-block` blocks attackers found by the port-scan, host-sweep and brute-force
+  checks the moment they are detected.
 
 ## Protecting the dashboard
 
@@ -205,6 +245,9 @@ The sniffer never keeps collecting forever:
       ^
       |    [ProcessMap]   names the program behind each record, from the
       |                   OS connection table (live capture only)
+      |    [NameCache]    names addresses from the DNS answers going past
+      |
+ [Defender]        advice and one-click fixes for alerts (Windows Firewall, ARP table)
       |
  [Flask API]       GET /api/packets   GET /api/stats   GET /api/alerts
       |            behind the access code; strict security headers
@@ -223,6 +266,8 @@ The sniffer never keeps collecting forever:
 | `core/security.py` | the seven security checks and their alerts |
 | `core/recorder.py` | saves packets to rotating .pcap files |
 | `core/processes.py` | names the program on this computer behind each packet |
+| `core/names.py` | names addresses from captured DNS answers |
+| `core/defense.py` | advice for every alert, one-click fixes and undo, auto-block |
 | `core/access.py` | access code, lockout and security headers for the dashboard |
 | `static/app.jsx` | dashboard source (React) |
 | `static/app.js` | the same, compiled to plain JavaScript by `tools/build.py` |
@@ -256,7 +301,16 @@ when a filter hid some packets.
 60 seconds of bandwidth, the retention period, the version, and the capture status
 (mode, interface, errors, dropped packets, why capture stopped, saved files).
 
-`GET /api/alerts` returns the newest alerts, counts by severity, and each check with its
+`GET /api/export/packets.csv` (same filters as `/api/packets`) and
+`GET /api/export/alerts.csv` download spreadsheets. Cells that start with `=`, `+`, `-`
+or `@` are prefixed with `'`, so captured text cannot run as an Excel formula.
+
+`POST /api/defense/apply {"alert_id": 2}` applies that alert's fix,
+`POST /api/defense/undo {"fix_id": 1}` undoes one, and `POST /api/capture/stop` and
+`/api/capture/start` stop and restart capture. These need `Content-Type: application/json`.
+
+`GET /api/alerts` returns the newest alerts (each with `advice`, `fix`, `fix_label` and
+`fixed`), the state of the fixes (`defense`), counts by severity, and each check with its
 number of alerts:
 
 ```json
@@ -276,11 +330,17 @@ number of alerts:
 python -m pytest
 ```
 
-83 tests cover the parser, the store and its decay, the filters, program naming, every security check
-(including both sample captures: every check fires on the attack, none on normal
-traffic, and no password ever appears in an alert), file rotation, capture limits, the
-access code and lockout, the security headers and the API. One test fails if
-`static/app.js` is older than `static/app.jsx`.
+110 tests cover:
+
+- the parser, the store and its decay, the filters, and program and website naming;
+- every security check, including both sample captures: every check fires on the
+  attack, none on normal traffic, and no password ever appears in an alert;
+- every fix and its safety checks, with netsh replaced by a recorder, so no test
+  changes Windows;
+- stopping and restarting capture, capture limits, file rotation and the CSV exports;
+- the access code, its lockout, the security headers and the API.
+
+One test fails if `static/app.js` is older than `static/app.jsx`.
 
 ## Building
 
@@ -314,6 +374,8 @@ pinned SHA-256 hashes.
 | Security checks: port scan, host sweep, SYN flood, ARP spoofing, cleartext | done |
 | Brute-force and cleartext-password detection | done |
 | Program behind each packet: APP column, top applications | done |
+| Advice and one-click fixes for alerts, auto-block | done |
+| Website names from DNS, CSV exports, stop/start capture | done |
 | Dashboard access code, lockout and security headers | done |
 | Offline dashboard, Windows .exe and release zips | done |
 | Testing on live traffic | done |
