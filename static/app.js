@@ -1,4 +1,4 @@
-// Built by tools/build.py from static/app.jsx (sha256 7bb7628ef78fc6c2ddb47dc582a9fc5db59e688a69a690be41f5f7bed4d3208c).
+// Built by tools/build.py from static/app.jsx (sha256 2e6fb2b942a829248f04e2e09333bc437cae30a0d3a544ea979e9e9be1871ab1).
 // Do not edit: change app.jsx, then run  python tools/build.py dashboard
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
@@ -142,6 +142,7 @@ function usePolling(filters) {
       clearInterval(timer);
     };
   }, []);
+  const refresh = () => tickRef.current?.();
   return {
     packets,
     stats,
@@ -149,7 +150,8 @@ function usePolling(filters) {
     offline,
     paused,
     setPaused,
-    filterError
+    filterError,
+    refresh
   };
 }
 function useWidth() {
@@ -526,10 +528,17 @@ function PacketTable({
     className: "label"
   }, "Live packets"), React.createElement("div", {
     className: "muted"
-  }, filtered ? `${rows.length} matching · ` : "", order === "newest" ? "Newest" : "Oldest", " first", kept, " \xB7 click a row to see its headers")), React.createElement("button", {
+  }, filtered ? `${rows.length} matching · ` : "", order === "newest" ? "Newest" : "Oldest", " first", kept, " \xB7 click a row to see its headers")), React.createElement("div", {
+    className: "head-buttons"
+  }, React.createElement("a", {
+    className: "button",
+    href: `/api/export/packets.csv?${filterQuery(filters)}`,
+    download: true,
+    title: "Download the packets shown (with the current filters) as a spreadsheet"
+  }, "Export CSV"), React.createElement("button", {
     className: paused ? "paused" : "",
     onClick: () => setPaused(!paused)
-  }, paused ? "Resume" : "Pause")), React.createElement(FilterBar, {
+  }, paused ? "Resume" : "Pause"))), React.createElement(FilterBar, {
     filters: filters,
     setFilters: setFilters,
     error: filterError
@@ -565,7 +574,11 @@ function PacketTable({
     title: p.app || "Program not known (another device, or a replayed file)"
   }, p.app || React.createElement("span", {
     className: "none"
-  }, "\u2014")), React.createElement("td", null, withPort(p.src, p.sport)), React.createElement("td", null, withPort(p.dst, p.dport)), React.createElement("td", null, React.createElement("span", {
+  }, "\u2014")), React.createElement("td", null, withPort(p.src, p.sport), p.src_name && React.createElement("span", {
+    className: "hostname"
+  }, p.src_name)), React.createElement("td", null, withPort(p.dst, p.dport), p.dst_name && React.createElement("span", {
+    className: "hostname"
+  }, p.dst_name)), React.createElement("td", null, React.createElement("span", {
     className: `badge p-${protoClass(p.proto)}`
   }, p.proto)), React.createElement("td", null, p.service || ""), React.createElement("td", {
     className: "num"
@@ -575,10 +588,85 @@ function PacketTable({
     className: "empty"
   }, filtered ? "No packets match these filters yet." : capturing ? React.createElement(React.Fragment, null, "Waiting for packets\u2026 open a website to generate some traffic.") : `Capture has stopped, and packets older than ${formatRetention(retention)} have decayed.`))));
 }
+async function postJSON(url, body = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body),
+    cache: "no-store"
+  });
+  if (response.status === 401) window.location.reload();
+  const data = await response.json().catch(() => ({}));
+  return {
+    ok: response.ok && data.ok !== false,
+    ...data
+  };
+}
+function AlertCard({
+  alert,
+  defense,
+  open,
+  onToggle,
+  onFocus,
+  onFix,
+  onUndo,
+  busy
+}) {
+  const fixed = alert.fixed;
+  const canFix = defense?.available;
+  return React.createElement("div", {
+    className: `alert${open ? " open" : ""}`
+  }, React.createElement("div", {
+    className: "alert-head"
+  }, React.createElement("span", {
+    className: `sev s-${alert.severity}`
+  }, SEVERITY_LABEL[alert.severity]), React.createElement("span", {
+    className: "title"
+  }, alert.title), React.createElement("span", {
+    className: "when"
+  }, formatTime(alert.last_seen), alert.count > 1 ? ` · ×${alert.count.toLocaleString()}` : "", fixed && React.createElement("span", {
+    className: "fixed-tag"
+  }, "FIXED")), React.createElement("span", {
+    className: "detail"
+  }, alert.detail)), React.createElement("div", {
+    className: "alert-actions"
+  }, React.createElement("button", {
+    onClick: () => onFocus(alert.focus)
+  }, "Show packets"), alert.advice && React.createElement("button", {
+    className: open ? "on" : "",
+    "aria-expanded": open,
+    onClick: onToggle
+  }, open ? "Hide fix" : "How to fix")), open && alert.advice && React.createElement("div", {
+    className: "fix"
+  }, React.createElement("p", null, alert.advice.meaning), React.createElement("ol", null, alert.advice.steps.map(step => React.createElement("li", {
+    key: step
+  }, step))), fixed ? React.createElement("div", {
+    className: "fix-done"
+  }, React.createElement("span", null, "\u2713 ", fixed.label, fixed.auto ? " (automatically)" : ""), React.createElement("button", {
+    disabled: busy,
+    onClick: () => onUndo(fixed.id)
+  }, "Undo")) : alert.fix_label ? React.createElement("div", {
+    className: "fix-do"
+  }, React.createElement("button", {
+    className: "primary",
+    disabled: !canFix || busy,
+    onClick: () => onFix(alert.id)
+  }, busy ? "Working…" : alert.fix_label), !canFix && defense?.reason && React.createElement("span", {
+    className: "muted"
+  }, defense.reason)) : React.createElement("div", {
+    className: "muted"
+  }, "No one-click fix for this one: follow the steps above.")));
+}
 function SecurityPanel({
   security,
-  onFocus
+  onFocus,
+  refresh
 }) {
+  const [open, setOpen] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(null);
   if (!security) {
     return React.createElement("div", {
       className: "card"
@@ -604,8 +692,20 @@ function SecurityPanel({
   const {
     alerts,
     rules,
-    checked
+    checked,
+    defense
   } = security;
+  const applied = defense?.applied || [];
+  async function act(url, body) {
+    setBusy(true);
+    const result = await postJSON(url, body);
+    setMessage({
+      ok: result.ok,
+      text: result.message
+    });
+    setBusy(false);
+    refresh();
+  }
   return React.createElement("div", {
     className: "card"
   }, React.createElement("div", {
@@ -626,24 +726,74 @@ function SecurityPanel({
     className: "name"
   }, rule.name, React.createElement("small", null, rule.description)), React.createElement("span", {
     className: "state"
-  }, rule.alerts ? `${rule.alerts} alert${rule.alerts > 1 ? "s" : ""}` : "OK")))), alerts.length === 0 ? React.createElement("div", {
+  }, rule.alerts ? `${rule.alerts} alert${rule.alerts > 1 ? "s" : ""}` : "OK")))), message && React.createElement("div", {
+    className: `fix-message ${message.ok ? "good" : "bad"}`,
+    role: "status"
+  }, React.createElement("span", null, message.text), React.createElement("button", {
+    className: "link",
+    onClick: () => setMessage(null)
+  }, "Dismiss")), alerts.length === 0 ? React.createElement("div", {
     className: "all-clear"
   }, "No threats detected so far.") : React.createElement("div", {
     className: "alerts"
-  }, alerts.map(a => React.createElement("button", {
-    className: "alert",
+  }, alerts.map(a => React.createElement(AlertCard, {
     key: a.id,
-    onClick: () => onFocus(a.focus),
-    title: `Show packets to or from ${a.focus}`
+    alert: a,
+    defense: defense,
+    open: !!open[a.id],
+    onToggle: () => setOpen(o => ({
+      ...o,
+      [a.id]: !o[a.id]
+    })),
+    onFocus: onFocus,
+    onFix: id => act("/api/defense/apply", {
+      alert_id: id
+    }),
+    onUndo: id => act("/api/defense/undo", {
+      fix_id: id
+    }),
+    busy: busy
+  }))), React.createElement("div", {
+    className: "protection"
+  }, React.createElement("div", {
+    className: "protection-head"
   }, React.createElement("span", {
-    className: `sev s-${a.severity}`
-  }, SEVERITY_LABEL[a.severity]), React.createElement("span", {
-    className: "title"
-  }, a.title), React.createElement("span", {
-    className: "when"
-  }, formatTime(a.last_seen), a.count > 1 ? ` · ×${a.count.toLocaleString()}` : ""), React.createElement("span", {
-    className: "detail"
-  }, a.detail)))));
+    className: "label"
+  }, "Protection"), React.createElement("span", {
+    className: "muted"
+  }, defense?.auto_block ? "Auto-block on" : "Auto-block off", " · ", React.createElement("a", {
+    href: "/api/export/alerts.csv",
+    download: true
+  }, "Export alerts (CSV)"))), applied.length === 0 ? React.createElement("div", {
+    className: "muted"
+  }, "No fixes applied.", defense && !defense.available && defense.reason ? ` ${defense.reason}` : "") : applied.map(f => React.createElement("div", {
+    className: "applied",
+    key: f.id
+  }, React.createElement("span", null, f.label, f.auto ? " (auto)" : "", React.createElement("small", null, formatTime(f.time))), React.createElement("button", {
+    disabled: busy,
+    onClick: () => act("/api/defense/undo", {
+      fix_id: f.id
+    })
+  }, "Undo")))));
+}
+function CaptureButton({
+  capture,
+  refresh
+}) {
+  const [busy, setBusy] = useState(false);
+  if (!capture) return null;
+  const running = capture.running;
+  async function toggle() {
+    setBusy(true);
+    await postJSON(`/api/capture/${running ? "stop" : "start"}`);
+    setBusy(false);
+    refresh();
+  }
+  return React.createElement("button", {
+    className: `capture-button ${running ? "stop" : "start"}`,
+    disabled: busy,
+    onClick: toggle
+  }, running ? "Stop capture" : "Start capture");
 }
 function Protocols({
   protocols,
@@ -748,7 +898,7 @@ function TopHosts({
     title: `${h.packets.toLocaleString()} packets. Click to show only this host.`
   }, React.createElement("span", {
     className: "name"
-  }, h.host), React.createElement("span", {
+  }, h.host, h.name && React.createElement("small", null, h.name)), React.createElement("span", {
     className: "bar"
   }, React.createElement("div", {
     style: {
@@ -820,7 +970,8 @@ function App() {
     offline,
     paused,
     setPaused,
-    filterError
+    filterError,
+    refresh
   } = usePolling(filters);
   const [selected, setSelected] = useState(null);
   const capture = stats?.capture;
@@ -844,10 +995,15 @@ function App() {
     className: "brand"
   }, React.createElement("div", {
     className: "layers"
-  }, React.createElement("span", null, "ETH"), React.createElement("span", null, "IP"), React.createElement("span", null, "TCP/UDP")), React.createElement("h1", null, "Packet Sniffer Dashboard")), React.createElement(StatusPill, {
+  }, React.createElement("span", null, "ETH"), React.createElement("span", null, "IP"), React.createElement("span", null, "TCP/UDP")), React.createElement("h1", null, "Packet Sniffer Dashboard")), React.createElement("div", {
+    className: "topbar-right"
+  }, React.createElement(StatusPill, {
     capture: capture,
     offline: offline
-  }))), React.createElement("div", {
+  }), !offline && React.createElement(CaptureButton, {
+    capture: capture,
+    refresh: refresh
+  })))), React.createElement("div", {
     className: "app"
   }, React.createElement(Banners, {
     capture: capture,
@@ -876,7 +1032,8 @@ function App() {
     packet: selected
   }), React.createElement(SecurityPanel, {
     security: security,
-    onFocus: focusHost
+    onFocus: focusHost,
+    refresh: refresh
   }), React.createElement(Protocols, {
     protocols: stats?.protocols,
     retention: retention,
