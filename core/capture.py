@@ -23,6 +23,45 @@ import time
 from .parser import parse_packet, tcp_payload
 
 
+def link_type(pkt):
+    """The pcap link-layer type of a captured packet (1 = Ethernet)."""
+    try:
+        from scapy.config import conf
+
+        return conf.l2types.layer2num.get(type(pkt), 1)
+    except Exception:
+        return 1
+
+
+def list_interfaces():
+    """Interfaces that can be captured on: name, description, addresses, MAC."""
+    try:
+        from scapy.config import conf
+
+        default = interface_name()
+        found = []
+        for iface in conf.ifaces.values():
+            ips = [ip for ips in getattr(iface, "ips", {}).values() for ip in ips]
+            found.append({"name": iface.name, "description": getattr(iface, "description", "") or iface.name,
+                          "ips": ips, "mac": getattr(iface, "mac", None), "default": iface.name == default})
+        return sorted(found, key=lambda i: (not i["default"], not i["ips"], i["name"]))
+    except Exception:
+        return []
+
+
+def check_filter(bpf_filter, iface=None):
+    """None if the BPF filter is valid, otherwise why not."""
+    if not bpf_filter:
+        return None
+    try:
+        from scapy.arch.common import compile_filter
+
+        compile_filter(bpf_filter, iface=iface)
+    except Exception as exc:
+        return f"Not a valid capture filter: {exc}"
+    return None
+
+
 def interface_name(iface=None):
     """Friendly name of an interface such as "Wi-Fi", or of the default one."""
     from scapy.config import conf
@@ -49,13 +88,16 @@ def capture_problem():
 
 class PacketPipeline:
     def __init__(self, store, queue_size=10000, on_record=None, monitor=None, recorder=None,
-                 limit_packets=None, limit_seconds=None, processes=None, names=None):
+                 limit_packets=None, limit_seconds=None, processes=None, names=None, flows=None,
+                 devices=None):
         self.store = store
         self.on_record = on_record  # optional callback, e.g. print each packet
         self.monitor = monitor      # optional SecurityMonitor, sees every record
         self.recorder = recorder    # optional RotatingPcapWriter, saves every packet
         self.processes = processes  # optional ProcessMap, names the program behind each packet
         self.names = names          # optional NameCache, names addresses from DNS answers
+        self.flows = flows          # optional FlowTable, groups packets into connections
+        self.devices = devices      # optional DeviceTable, lists the devices on the network
         self.limit_packets = limit_packets
         self.limit_seconds = limit_seconds
         self.queue = queue.Queue(maxsize=queue_size)
@@ -118,21 +160,26 @@ class PacketPipeline:
                 continue
             try:
                 record = parse_packet(pkt, timestamp)
+                payload = tcp_payload(pkt) if record["payload_len"] and record["proto"] == "TCP" else b""
                 if self.processes:
                     record["app"] = self.processes.lookup(record)
+                if self.names is not None and record["proto"] == "UDP" and record["info"].startswith("DNS answer"):
+                    self.names.learn(pkt)
+                if self.flows is not None:
+                    self._follow_connection(record, payload)
                 if self.names is not None:   # (an empty cache is falsy)
-                    if record["proto"] == "UDP" and record["info"].startswith("DNS answer"):
-                        self.names.learn(pkt)
-                    record["src_name"] = self.names.name(record["src"])
-                    record["dst_name"] = self.names.name(record["dst"])
-                record = self.store.add(record)
+                    record["src_name"] = record["src_name"] or self.names.name(record["src"])
+                    record["dst_name"] = record["dst_name"] or self.names.name(record["dst"])
+                if self.devices is not None:
+                    self.devices.update(record)
+                raw = getattr(pkt, "original", None) or bytes(pkt)
+                record = self.store.add(record, raw=(raw, link_type(pkt)))
             except Exception:
                 self._count("parse_errors")
                 continue
             if self.monitor:
                 # Only packets of cleartext login protocols are opened up and read.
-                payload = tcp_payload(pkt) if self.monitor.wants_payload(record) else b""
-                self.monitor.inspect(record, payload)
+                self.monitor.inspect(record, payload if self.monitor.wants_payload(record) else b"")
             if self.recorder:
                 self.recorder.write(pkt)
             if self.on_record:
@@ -175,9 +222,27 @@ class PacketPipeline:
             self._set(stopped="stopped from the dashboard")
             self.stop()
 
-    def restart(self):
-        """Start capturing again the way it was last started; False if it is already running."""
-        if self.status()["running"] or self._last_start is None:
+    def _follow_connection(self, record, payload):
+        learned = self.flows.update(record, payload)
+        record["flow"] = learned.get("flow")
+        if learned.get("note"):
+            record["tcp_note"] = learned["note"]
+            record["info"] += f" [{learned['note']}]"
+        if learned.get("sni"):
+            # The site name of an HTTPS connection names its server from now on
+            record["tls_sni"] = record["dst_name"] = learned["sni"]
+            record["info"] = f"TLS ClientHello {learned['sni']}"
+            if self.names is not None:
+                self.names.remember(record["dst"], learned["sni"])
+
+    def restart(self, iface=None, bpf_filter=None, change=False):
+        """Start capturing again; with ``change``, live capture uses the given interface and filter.
+        False if it is already running."""
+        if self._last_start is None:
+            return False
+        if change and self.status()["mode"] == "live":
+            self._last_start = (self.start_live, iface, bpf_filter or None)
+        if self.status()["running"] and not change:
             return False
         self.stop()
         with self._lock:
