@@ -1,14 +1,22 @@
 # Real-Time Packet Sniffer with Live Traffic Dashboard
 
+[![tests](https://github.com/rajveer-lab/packet-sniffer/actions/workflows/tests.yml/badge.svg)](https://github.com/rajveer-lab/packet-sniffer/actions/workflows/tests.yml)
+
 Computer Networks project (team Big Packet). The sniffer captures live packets from a
-network interface, decodes the Ethernet, IP, TCP and UDP headers, and shows the
-traffic on a web dashboard that refreshes every second. It names the program on this
-computer behind each packet (chrome.exe, Spotify.exe, ...) and the website behind each
-address, filters the packet table, checks every packet for common attacks and for
-passwords sent in clear text, explains every alert and fixes it with one click where it
-can (blocking the attacker in Windows Firewall), keeps the dashboard locked behind an
-access code, and lets old data decay so it can run for hours without filling memory or
-disk.
+network interface, decodes them layer by layer (Ethernet, IP, TCP/UDP/ICMP, and DNS,
+DHCP, HTTP and the TLS handshake above them), and shows the traffic on a web dashboard
+that refreshes every second.
+
+- It names the **program** behind each packet (chrome.exe, Spotify.exe, ...) and the
+  **website** behind each address, even for HTTPS.
+- It follows every **connection** through the TCP handshake, measures round-trip times
+  and spots retransmissions, and lists the **devices** on the network with their maker.
+- It checks every packet against **twelve security checks**, explains every alert and
+  fixes it with one click where it can (blocking the attacker in the firewall).
+- It keeps a **history** between runs, makes a **printable report**, exports CSV and
+  .pcap files, and has a dark theme and large text for projectors.
+- The dashboard is locked behind an access code, and old data decays so it can run for
+  hours without filling memory or disk.
 
 ## Download and run (Windows)
 
@@ -64,6 +72,10 @@ If no packets appear on Windows, run the terminal as Administrator.
 | `--save [FOLDER]` | also save packets to rotating .pcap files (default folder `captures`) |
 | `--file-size 10 --keep-files 5` | with `--save`: new file every 10 MB, keep only the newest 5 |
 | `--no-security` | turn off the security checks |
+| `--blocklist FILE` | more domains for the blocklist check, one per line (hosts-file lines work too) |
+| `--upload-mb 50` | the Unusual upload check: MB sent to one outside address within a minute |
+| `--history FILE` | where the history is kept (default `%LOCALAPPDATA%\PacketSniffer\history.db`) |
+| `--no-history` | keep no history between runs |
 | `--auto-block` | block port scanners, host sweepers and brute-forcers as soon as they are found (Administrator) |
 | `--no-apps` | do not name the program behind each packet |
 | `--token CODE` | choose the dashboard access code (default: a new random one each run) |
@@ -87,7 +99,9 @@ python sniffer.py --pcap samples/attack_traffic.pcap
   stream, a phone browsing, ping, ARP). It raises no security alerts.
 - `attack_traffic.pcap`: 22 seconds of a network under attack (a ping sweep, a port
   scan, ARP spoofing, a SYN flood, Telnet, FTP and plain-HTTP logins, an SSH brute
-  force). Every one of the seven checks raises an alert.
+  force, a rogue DHCP server, an ICMP redirect, a blocklisted lookup and DNS tunneling).
+  Eleven of the twelve checks raise an alert; the twelfth, Unusual upload, needs 50 MB
+  in a minute, too much for a sample file.
 
 The dashboard marks replayed traffic clearly as **REPLAY**, not live. The files are
 made by `python tools/make_sample_pcap.py` and `python tools/make_attack_pcap.py`,
@@ -95,8 +109,17 @@ which only write a file and send nothing on the network.
 
 ## Dashboard
 
-- **Bandwidth graph**: bytes per second over the last minute. Hover over it, or use the
-  arrow keys, to read any second.
+Four views, chosen under the top bar: **Packets**, **Connections**, **Devices** and
+**History**. The top bar also has **Stop / Start capture**, **Settings** (choose the
+interface and a capture filter, then restart capture), **Alerts** (a desktop pop-up and
+a sound for every new high-severity alert), **Theme** (light, dark, or follow the
+computer), **Large text** for projectors, and **Report**.
+
+The Packets view:
+
+- **Bandwidth graph**: bytes per second over the last minute, in total or **by
+  program** (one line per busy program). Hover over it, or use the arrow keys, to read
+  any second.
 - **Live packets** with filters: protocol buttons, an IP, MAC or subnet
   (`192.168.1.0/24`), a port, and a free-text search over every column. All filters
   combine. Clicking a protocol, a top host or an alert filters the table to it.
@@ -109,13 +132,17 @@ which only write a file and send nothing on the network.
 - **Website names**: addresses are shown with the name the computer looked up for them
   (`203.0.113.10` &rarr; `video.example.com`), learned from the DNS answers going past.
   DNS rows say what was asked and answered.
-- **Packet details**: click a row to see its program and headers, layer by layer.
+- **Packet details**: click a row to see its program and headers, layer by layer, and
+  **Show bytes** for a hex dump coloured by layer (where Ethernet ends and IP begins, and
+  so on), as in Wireshark's bottom pane. Retransmissions and duplicate ACKs are marked in
+  the info column.
 - **Security**: the seven checks with their status, and the alerts they raised. Each
   alert has **How to fix** (what it means, what to do, and a one-click fix where there is
   one) and **Show packets**. **Protection** lists the fixes in place, each with Undo.
 - **Stop capture / Start capture** in the top bar, without closing the program.
-- **Export CSV**: the packets shown (with the current filters), and the security alerts
-  with their advice, as spreadsheets.
+- **Export CSV / Export .pcap**: the packets shown (with the current filters) as a
+  spreadsheet or as a capture file for Wireshark, and the security alerts with their
+  advice as a spreadsheet.
 - **Protocols** and **Top hosts**: shares over the retention period (5 minutes by default).
 
 The protocol buttons and other table filters only change what is shown, so they can be
@@ -141,6 +168,47 @@ devices' broadcasts (no program here sent them), ICMP and ARP (they have no port
 connections that opened and closed between two reads. Replayed files never have names.
 No administrator rights are needed.
 
+## Connections
+
+`core/flows.py` groups packets into conversations and follows each TCP connection the
+way the textbook draws it: SYN sent, SYN received, established, closing, closed (or
+reset). The **Connections** view lists them with:
+
+- **round-trip time**, from the client's SYN to the server's SYN-ACK;
+- packets and bytes each way, how long it lasted, and who closed it;
+- **retransmissions** (a segment whose data was already sent: it or its ACK was lost)
+  and **duplicate ACKs** (the receiver asking again for a missing segment), counted per
+  connection and in total, as a measure of the path's quality;
+- the **site name** of an HTTPS connection, read from the TLS ClientHello, the first
+  message of every HTTPS connection, which names the site before encryption starts. It is
+  collected across TCP segments when it is too big for one (modern browsers' are).
+
+Click a connection to see its packets.
+
+## Devices
+
+`core/devices.py` lists the devices on the local network from their own traffic: their
+addresses (from ARP and their packets), the name they give themselves when asking DHCP
+for an address, and their **maker**, looked up from the first half of the MAC in
+Scapy's copy of the IEEE list (Apple, Samsung, TP-Link, ...). Phones often use a
+made-up "randomised" MAC for privacy; those are labelled as such. This computer and the
+router are marked. Click a device to see its packets.
+
+## History
+
+The packet table lives in memory, but `core/history.py` keeps a small SQLite database
+(one file, no server) of every session, every alert and every connection (who talked to
+whom and how much, never packet contents). It is written every 10 seconds and when the
+sniffer stops, and anything older than 7 days is deleted. The **History** view shows the
+last hour, 6 hours, 24 hours or 7 days: sessions, the busiest servers, and the alerts.
+
+## Report
+
+**Report** in the top bar (or `/report`) opens a one-page summary for saving as PDF: the
+capture's totals, every alert with what it means and what to do, the top programs,
+websites and protocols, the busiest connections with their round-trip times, and the
+devices seen.
+
 ## Security checks
 
 Every decoded packet goes through `core/security.py`. Each check looks at a short
@@ -155,6 +223,16 @@ sliding window of traffic:
 | Cleartext | Telnet, FTP, POP3, IMAP or HTTP carries data, so logins can be read | medium / low (HTTP) |
 | Brute-force login | one source opens 20+ connections to SSH, RDP, FTP, Telnet, SMB, VNC or a database within 60 s | high |
 | Password in clear text | a password crosses the network unencrypted: FTP or POP3 `PASS`, IMAP `LOGIN`, HTTP Basic auth or a login form, or what is typed after a Telnet `Password:` prompt | high |
+| Blocklisted domain | a program looks up a domain on the blocklist (`core/blocklist.txt`, plus `--blocklist`) | high |
+| DNS tunneling | a DNS name has a label of 50+ characters, or 25+ random-looking subdomains of one domain are looked up within 60 s: data hidden in DNS | medium |
+| Unusual upload | this computer sends 50+ MB (`--upload-mb`) to one outside address within 60 s | medium |
+| Rogue DHCP server | a second DHCP server hands out addresses; it could make itself your router or DNS server | high |
+| ICMP redirect | a device tells this computer to send traffic through a different router | medium |
+
+The built-in blocklist holds only test domains (Google's Safe Browsing test site,
+WICAR's test page, and reserved `.example` names used by the attack sample). For real
+protection add a threat feed with `--blocklist`, one domain per line; hosts-file lines
+such as `0.0.0.0 bad.example` work too.
 
 An ongoing attack keeps updating one alert (its count and detail) instead of flooding
 the list; the same check for the same source alerts again after 60 quiet seconds.
@@ -176,10 +254,16 @@ protect itself there is a one-click fix (`core/defense.py`):
 | Port scan, host sweep, brute-force login | block the attacker's IP, in and out | `netsh advfirewall firewall add rule name=PacketSniffer-block-<ip> dir=in/out action=block remoteip=<ip>` |
 | ARP spoofing | pin the real MAC of the spoofed address, so the fake one is ignored | `netsh interface ipv4 add neighbors <interface> <ip> <real mac> store=active` |
 | Telnet, FTP, POP3 or IMAP in use, or a password sent over them | block that protocol going out | `netsh advfirewall firewall add rule name=PacketSniffer-block-outgoing-TCP-<port> dir=out action=block protocol=TCP remoteport=<port>` |
-| SYN flood, plain HTTP | advice only: flood senders are forged, and blocking all HTTP would break much of the web | |
+| Rogue DHCP server, unusual upload | block that address, in and out | as for a port scan |
+| ICMP redirect | stop obeying ICMP redirects | `netsh interface ipv4 set global icmpredirects=disabled` |
+| SYN flood, plain HTTP, blocklisted domain, DNS tunneling | advice only: flood senders are forged, blocking all HTTP would break much of the web, and for the last two the program doing it is what needs dealing with | |
 
-- Fixes need PacketSniffer to run **as Administrator**; otherwise the dashboard shows the
-  advice and says so. They are Windows-only.
+- Fixes need PacketSniffer to run **as Administrator** (with `sudo` on Linux and macOS);
+  otherwise the dashboard shows the advice and says so.
+- On **Linux** the same fixes use `iptables`/`ip6tables` (rules commented
+  `PacketSniffer-...`), `ip neigh replace ... nud permanent` and `sysctl`. On **macOS**
+  pinning a MAC (`arp -s`) and ignoring redirects (`sysctl`) work; blocking an address
+  needs the pf firewall, which is not automated, so the dashboard says so.
 - Every fix can be undone from the **Protection** list. Firewall rules are all named
   `PacketSniffer-...`; pinned ARP entries are temporary and disappear after a restart.
 - A fix never blocks this computer's own addresses, its router, loopback, broadcast or
@@ -242,18 +326,20 @@ The sniffer never keeps collecting forever:
       +--> [SecurityMonitor]  port scan, host sweep, SYN flood, ARP spoofing, cleartext,
       |                       brute force, passwords (reads cleartext login payloads only)
       +--> [RotatingPcapWriter]  optional .pcap files, oldest deleted
+      +--> [FlowTable]        connections: TCP state, round trip, retransmissions, HTTPS names
+      +--> [DeviceTable]      devices on the network, their makers and names
       ^
       |    [ProcessMap]   names the program behind each record, from the
       |                   OS connection table (live capture only)
       |    [NameCache]    names addresses from the DNS answers going past
       |
- [Defender]        advice and one-click fixes for alerts (Windows Firewall, ARP table)
+ [Defender]        advice and one-click fixes for alerts (firewall, ARP table)
+ [History]         sessions, alerts and connections in SQLite, kept 7 days
       |
- [Flask API]       GET /api/packets   GET /api/stats   GET /api/alerts
+ [Flask API]       packets, stats, alerts, connections, devices, history, exports, /report
       |            behind the access code; strict security headers
       |  JSON, polled every second
- [React dashboard] bandwidth graph, filtered packet table, security panel,
-                   protocol share, top hosts, packet details
+ [React dashboard] Packets, Connections, Devices and History views
 ```
 
 | File | Role |
@@ -267,7 +353,12 @@ The sniffer never keeps collecting forever:
 | `core/recorder.py` | saves packets to rotating .pcap files |
 | `core/processes.py` | names the program on this computer behind each packet |
 | `core/names.py` | names addresses from captured DNS answers |
-| `core/defense.py` | advice for every alert, one-click fixes and undo, auto-block |
+| `core/defense.py` | advice for every alert, one-click fixes and undo, auto-block (Windows, Linux, macOS) |
+| `core/flows.py` | connections: TCP state, round-trip time, retransmissions, duplicate ACKs, HTTPS site names |
+| `core/devices.py` | devices on the local network, with maker and name |
+| `core/history.py` | sessions, alerts and connections kept between runs (SQLite) |
+| `core/report.py` | the printable report page |
+| `core/blocklist.txt` | the built-in test blocklist |
 | `core/access.py` | access code, lockout and security headers for the dashboard |
 | `static/app.jsx` | dashboard source (React) |
 | `static/app.js` | the same, compiled to plain JavaScript by `tools/build.py` |
@@ -275,6 +366,7 @@ The sniffer never keeps collecting forever:
 | `tools/build.py` | builds the dashboard, `PacketSniffer.exe` and the release zips |
 | `tools/make_*.py` | scripts that generate the two sample captures |
 | `tests/` | unit tests for every module |
+| `.github/workflows/tests.yml` | runs the tests on GitHub for every push |
 
 ### API
 
@@ -305,6 +397,14 @@ when a filter hid some packets.
 `GET /api/export/alerts.csv` download spreadsheets. Cells that start with `=`, `+`, `-`
 or `@` are prefixed with `'`, so captured text cannot run as an Excel formula.
 
+`GET /api/connections` lists connections and their summary, `GET /api/devices` the
+devices, `GET /api/packets/<id>/bytes` one packet's bytes (hex) and where each header
+starts and ends, `GET /api/history?hours=24` the history, `GET /api/interfaces` the
+interfaces that can be captured on, `GET /api/export/packets.pcap` the packets as a
+capture file, and `GET /report` the printable report. `POST /api/capture/start` with
+`{"iface": "Wi-Fi", "filter": "tcp port 443"}` restarts live capture with those settings
+(a bad filter is refused with the reason).
+
 `POST /api/defense/apply {"alert_id": 2}` applies that alert's fix,
 `POST /api/defense/undo {"fix_id": 1}` undoes one, and `POST /api/capture/stop` and
 `/api/capture/start` stop and restart capture. These need `Content-Type: application/json`.
@@ -330,17 +430,25 @@ number of alerts:
 python -m pytest
 ```
 
-110 tests cover:
+146 tests cover:
 
-- the parser, the store and its decay, the filters, and program and website naming;
+- the parser and every decoder (DNS, DHCP, HTTP, TLS site names from a real ClientHello,
+  ICMPv6), the hex view's layer boundaries, the store and its decay, the filters, and
+  program and website naming;
+- connections: the TCP handshake and close, round-trip time, retransmissions, duplicate
+  ACKs, and a ClientHello split over two segments;
+- devices, makers and randomised MACs; the history surviving a restart and expiring;
+  the report page escaping captured text; .pcap downloads that read back in Scapy;
 - every security check, including both sample captures: every check fires on the
   attack, none on normal traffic, and no password ever appears in an alert;
-- every fix and its safety checks, with netsh replaced by a recorder, so no test
-  changes Windows;
+- every fix and its safety checks on Windows, Linux and macOS, with the commands
+  replaced by a recorder, so no test changes the system;
 - stopping and restarting capture, capture limits, file rotation and the CSV exports;
 - the access code, its lockout, the security headers and the API.
 
-One test fails if `static/app.js` is older than `static/app.jsx`.
+One test fails if `static/app.js` is older than `static/app.jsx`. GitHub runs the tests
+on every push (the badge at the top); the one test that needs a capture driver is skipped
+there.
 
 ## Building
 
@@ -360,6 +468,23 @@ After editing `static/app.jsx`, run `python tools/build.py dashboard` to recompi
 `static/app.js`. Downloaded files (React, and Babel for compiling) are checked against
 pinned SHA-256 hashes.
 
+### Signing the .exe
+
+Windows shows "unknown publisher" for programs that are not signed. Signing needs a
+code-signing certificate from a certificate authority (it is bought, not made here).
+With one installed, sign after building:
+
+```
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a dist\PacketSniffer\PacketSniffer.exe
+```
+
+(`signtool` comes with the Windows SDK.) Then zip the folder again.
+
+### Not included
+
+Alerts can pop up on the desktop with a sound, but not as phone messages: that needs an
+account with a messaging service (and its key), which this project does not assume.
+
 ## Progress
 
 | Milestone | Status |
@@ -376,6 +501,12 @@ pinned SHA-256 hashes.
 | Program behind each packet: APP column, top applications | done |
 | Advice and one-click fixes for alerts, auto-block | done |
 | Website names from DNS, CSV exports, stop/start capture | done |
+| HTTPS site names, connections view (handshake, round trip, retransmissions) | done |
+| Devices with makers, history between runs, printable report | done |
+| Hex view, .pcap download, per-program bandwidth graph | done |
+| Blocklist, DNS tunneling, unusual upload, rogue DHCP and ICMP redirect checks | done |
+| Interface and filter settings, desktop alerts, dark theme, large text | done |
+| Fixes on Linux and macOS, tests on GitHub Actions | done |
 | Dashboard access code, lockout and security headers | done |
 | Offline dashboard, Windows .exe and release zips | done |
 | Testing on live traffic | done |
