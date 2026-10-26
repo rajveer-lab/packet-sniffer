@@ -14,6 +14,11 @@ sent on the network. Replay it with:
    15 s   laptop logs in to the NAS over Telnet and FTP, and   -> Cleartext,
           to a website through a plain-HTTP login form             Password in clear text
    18 s   attacker tries 30 SSH logins on the NAS              -> Brute-force login
+   19 s   the attacker answers DHCP as well as the router      -> Rogue DHCP server
+   20 s   the attacker sends the laptop an ICMP redirect       -> ICMP redirect
+   20 s   something on the laptop looks up malware.example     -> Blocklisted domain
+   21 s   and smuggles data out in 30 random DNS names         -> DNS tunneling
+(The Unusual upload check needs 50 MB in a minute, too much for a sample file.)
 
 Run:  python tools/make_attack_pcap.py [output.pcap]
 """
@@ -22,7 +27,9 @@ import os
 import random
 import sys
 
-from scapy.layers.inet import ICMP, IP, TCP
+from scapy.layers.dhcp import BOOTP, DHCP
+from scapy.layers.dns import DNS, DNSQR
+from scapy.layers.inet import ICMP, IP, TCP, UDP
 from scapy.layers.l2 import ARP, Ether
 from scapy.packet import Raw
 from scapy.utils import wrpcap
@@ -41,15 +48,19 @@ def lan(src, dst):
 
 def tcp_session(b, t, client, server, sport, dport, lines):
     """Handshake, then the client and server take turns sending lines of text."""
-    b.add(t, lan(client, server) / TCP(sport=sport, dport=dport, flags="S"))
-    b.add(t + 0.002, lan(server, client) / TCP(sport=dport, dport=sport, flags="SA"))
-    b.add(t + 0.003, lan(client, server) / TCP(sport=sport, dport=dport, flags="A"))
+    c, s = 2000, 9000                                   # each side's next sequence number
+    b.add(t, lan(client, server) / TCP(sport=sport, dport=dport, flags="S", seq=c))
+    b.add(t + 0.002, lan(server, client) / TCP(sport=dport, dport=sport, flags="SA", seq=s, ack=c + 1))
+    c, s = c + 1, s + 1
+    b.add(t + 0.003, lan(client, server) / TCP(sport=sport, dport=dport, flags="A", seq=c, ack=s))
     for i, (from_client, text) in enumerate(lines):
         at = t + 0.2 * (i + 1)
         if from_client:
-            b.add(at, lan(client, server) / TCP(sport=sport, dport=dport, flags="PA") / Raw(text))
+            b.add(at, lan(client, server) / TCP(sport=sport, dport=dport, flags="PA", seq=c, ack=s) / Raw(text))
+            c += len(text)
         else:
-            b.add(at, lan(server, client) / TCP(sport=dport, dport=sport, flags="PA") / Raw(text))
+            b.add(at, lan(server, client) / TCP(sport=dport, dport=sport, flags="PA", seq=s, ack=c) / Raw(text))
+            s += len(text)
 
 
 def build():
@@ -60,7 +71,7 @@ def build():
     b.add(0.0, Ether(src=ROUTER[1], dst=LAPTOP[1]) / ARP(op=2, hwsrc=ROUTER[1], psrc=ROUTER[0],
                                                         hwdst=LAPTOP[1], pdst=LAPTOP[0]))
     b.dns_lookup(0.3, LAPTOP, "video.example.com", VIDEO_SITE, sport=53011)
-    b.handshake(0.4, LAPTOP, VIDEO_SITE, sport=52344)
+    b.handshake(0.4, LAPTOP, VIDEO_SITE, sport=52344, name="video.example.com")
     b.download(1.0, 18, LAPTOP, VIDEO_SITE, sport=52344, start_rate=8, end_rate=12)
 
     # Host sweep: ping every address from .1 to .40; three hosts answer
@@ -69,9 +80,9 @@ def build():
         t = 2.0 + i * 0.03
         b.add(t, Ether(src=ATTACKER[1], dst="ff:ff:ff:ff:ff:ff") / IP(src=ATTACKER[0], dst=target)
               / ICMP(type=8, id=66, seq=i))
-        if target in (ROUTER[0], LAPTOP[0], NAS[0]):
-            b.add(t + 0.002, Ether(dst=ATTACKER[1], src="00:00:00:00:00:01") / IP(src=target, dst=ATTACKER[0])
-                  / ICMP(type=0, id=66, seq=i))
+        responder = {ROUTER[0]: ROUTER, LAPTOP[0]: LAPTOP, NAS[0]: NAS}.get(target)
+        if responder:
+            b.add(t + 0.002, lan(responder, ATTACKER) / ICMP(type=0, id=66, seq=i))
 
     # Port scan: half-open SYN scan of 150 ports; closed ports answer RST, open ones SYN-ACK
     ports = list(range(1, 151))
@@ -101,10 +112,10 @@ def build():
         (False, b"NAS login: "), (True, b"admin\r\n"), (False, b"Password: "), (True, b"letmein\r\n")])
     tcp_session(b, 16.0, LAPTOP, NAS, 50101, 21, [
         (False, b"220 NAS FTP ready\r\n"), (True, b"USER backup\r\n"), (True, b"PASS backup123\r\n")])
-    b.add(17.0, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="S"))
-    b.add(17.05, b.inbound(VIDEO_SITE, LAPTOP) / TCP(sport=80, dport=50102, flags="SA"))
-    b.add(17.06, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="A"))
-    b.add(17.07, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="PA")
+    b.add(17.0, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="S", seq=3000))
+    b.add(17.05, b.inbound(VIDEO_SITE, LAPTOP) / TCP(sport=80, dport=50102, flags="SA", seq=7000, ack=3001))
+    b.add(17.06, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="A", seq=3001, ack=7001))
+    b.add(17.07, b.frame(LAPTOP, VIDEO_SITE) / TCP(sport=50102, dport=80, flags="PA", seq=3001, ack=7001)
           / Raw(b"POST /login HTTP/1.1\r\nHost: video.example.com\r\n"
                 b"Content-Type: application/x-www-form-urlencoded\r\n\r\n"
                 b"username=rajveer&password=hunter22"))
@@ -117,6 +128,28 @@ def build():
         b.add(t + 0.002, lan(NAS, ATTACKER) / TCP(sport=22, dport=sport, flags="SA"))
         b.add(t + 0.003, lan(ATTACKER, NAS) / TCP(sport=sport, dport=22, flags="A"))
         b.add(t + 0.05, lan(NAS, ATTACKER) / TCP(sport=22, dport=sport, flags="RA"))
+
+    # Rogue DHCP: the router answers the laptop's request, then the attacker answers too,
+    # offering itself as router and DNS server
+    chaddr = bytes.fromhex(LAPTOP[1].replace(":", ""))
+    for t, server in ((19.0, ROUTER), (19.01, ATTACKER)):
+        b.add(t, Ether(src=server[1], dst="ff:ff:ff:ff:ff:ff") / IP(src=server[0], dst="255.255.255.255")
+              / UDP(sport=67, dport=68) / BOOTP(op=2, yiaddr=LAPTOP[0], chaddr=chaddr)
+              / DHCP(options=[("message-type", "offer"), ("server_id", server[0]), ("router", server[0]),
+                              ("name_server", server[0]), "end"]))
+
+    # ICMP redirect: "send traffic for the video site through me"
+    b.add(20.0, lan(ATTACKER, LAPTOP) / ICMP(type=5, code=1, gw=ATTACKER[0])
+          / IP(src=LAPTOP[0], dst=VIDEO_SITE) / TCP(sport=52344, dport=443))
+
+    # A lookup of a blocklisted domain
+    b.dns_lookup(20.5, LAPTOP, "update.malware.example", "198.51.100.66", sport=53100)
+
+    # DNS tunneling: data hidden in 30 random-looking names under one domain
+    for i in range(30):
+        chunk = "".join(random.choice("abcdef0123456789") for _ in range(32))
+        b.add(21.0 + i * 0.05, b.frame(LAPTOP, "8.8.8.8") / UDP(sport=53200 + i, dport=53)
+              / DNS(rd=1, qd=DNSQR(qname=f"{chunk}.t.tunnel.example", qtype="TXT")))
 
     b.packets.sort(key=lambda p: p.time)
     return b.packets
